@@ -9,14 +9,15 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Security, status
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field, field_validator
 
-from app import accounts, db
+from app import accounts, billing, db
 from app.account_api import router as account_router
+from app.billing_api import error_response, router as billing_router
 from app.errors import OperationError
 from app.registry import OPERATIONS, WORKERS, warm_list
 from app.workers import WorkerFailure
@@ -29,15 +30,23 @@ _executor = ThreadPoolExecutor(max_workers=64, thread_name_prefix="task")
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    global _executor
     loop = asyncio.get_running_loop()
     for name in warm_list():  # optional pre-start, in the background so /health is up immediately
         loop.run_in_executor(_executor, _warm, name)
-    if db.configured():  # create the schema at boot; failures are retried on first use
+    maintenance = None
+    if db.configured():  # migrate at boot; failures are retried on first use
         loop.run_in_executor(_executor, _init_db)
+        maintenance = billing.Maintenance()  # heartbeat + release reservations of dead API processes
+        maintenance.start()
     yield
+    if maintenance is not None:
+        maintenance.stop.set()
     for worker in WORKERS.values():
         worker.kill()
-    _executor.shutdown(wait=False, cancel_futures=True)
+    # Swap in a fresh pool so the app object stays usable if it is started again (tests).
+    old, _executor = _executor, ThreadPoolExecutor(max_workers=64, thread_name_prefix="task")
+    old.shutdown(wait=False, cancel_futures=True)
     db.close()
 
 
@@ -56,8 +65,9 @@ def _warm(name: str) -> None:
         log.error("worker %s failed to warm: %s", name, exc)
 
 
-app = FastAPI(title="Unified Algorithm API", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="Unified Algorithm API", version="0.4.0", lifespan=lifespan)
 app.include_router(account_router)
+app.include_router(billing_router)
 
 API_KEY_ENV = "API_KEY"
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -152,7 +162,7 @@ def list_operations(caller: Caller = Depends(require_api_key)) -> Dict[str, Any]
 _STDERR_MARKER = "; last stderr:"
 
 
-async def _run(task: Task, diagnostics: bool) -> TaskResult:
+async def _run(task: Task, diagnostics: bool, on_start: Optional[Callable[[], None]] = None) -> TaskResult:
     started = time.perf_counter()
 
     def result(**kw) -> TaskResult:
@@ -167,10 +177,14 @@ async def _run(task: Task, diagnostics: bool) -> TaskResult:
     loop = asyncio.get_running_loop()
     try:
         if spec.inline is not None:
-            output = await asyncio.wait_for(loop.run_in_executor(_executor, spec.inline, task.inputs), timeout)
+            def run_inline():
+                if on_start is not None:
+                    on_start()
+                return spec.inline(task.inputs)
+            output = await asyncio.wait_for(loop.run_in_executor(_executor, run_inline), timeout)
         else:
             output = await loop.run_in_executor(_executor, WORKERS[spec.worker].call,
-                                                task.operation, task.inputs, timeout)
+                                                task.operation, task.inputs, timeout, on_start)
         return result(status="ok", output=output)
     except OperationError as exc:
         return result(status="error", error_type="invalid_input", error=str(exc))
@@ -186,26 +200,55 @@ async def _run(task: Task, diagnostics: bool) -> TaskResult:
         return result(status="error", error_type="operation_failed", error=f"{type(exc).__name__}: {exc}")
 
 
-@app.post("/v1/execute", response_model=ExecuteResponse, response_model_exclude_none=True)
-async def execute(request: ExecuteRequest, caller: Caller = Depends(require_api_key)) -> ExecuteResponse:
+@app.post("/v1/execute", response_model=ExecuteResponse, response_model_exclude_none=True,
+          responses={402: {"description": "insufficient_credits: nothing was run"}})
+async def execute(request: ExecuteRequest, caller: Caller = Depends(require_api_key)):
     """Run all tasks concurrently; tasks for the same library are queued on that library's worker.
 
-    Calls made with a customer key are recorded as usage: one entry for the request and one per task.
+    Customer keys (when BILLING_MODE is test/live): 1 credit per known operation. The full batch
+    cost is reserved atomically before any work starts (402 insufficient_credits otherwise);
+    operations that never start are refunded. Unknown operations are rejected free of charge.
+    Calls made with a customer key are recorded as usage. The operator key is never charged.
     """
     started = time.perf_counter()
-    results = list(await asyncio.gather(*(_run(t, caller.kind == "operator") for t in request.tasks)))
+    loop = asyncio.get_running_loop()
+    reservation: Optional[billing.Reservation] = None
+    cost = sum(1 for t in request.tasks if t.operation in OPERATIONS)
+    if caller.owner is not None and cost and billing.config().enforced:
+        max_seconds = sum(min(t.timeout_s or OPERATIONS[t.operation].default_timeout,
+                              OPERATIONS[t.operation].max_timeout)
+                          for t in request.tasks if t.operation in OPERATIONS) + 120
+        try:
+            reservation = await loop.run_in_executor(_executor, billing.reserve, caller.owner, cost, max_seconds)
+        except billing.BillingError as exc:
+            return error_response(exc)
+        except db.DatabaseUnavailable:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="credit store unavailable") from None
+
+    charged = 0
+    try:
+        on_start = reservation.mark_started if reservation else None
+        results = list(await asyncio.gather(*(_run(t, caller.kind == "operator", on_start) for t in request.tasks)))
+    finally:
+        if reservation is not None:  # charge started operations, release the rest (also on errors)
+            try:
+                charged = await loop.run_in_executor(_executor, billing.settle, reservation)
+            except Exception as exc:  # the sweeper settles it from the persisted start count
+                log.error("settling reservation %s failed: %s", reservation.id, type(exc).__name__)
+                charged = reservation.started
     if caller.owner is not None:
-        await _record_usage(caller.owner, (time.perf_counter() - started) * 1000, results)
+        await _record_usage(caller.owner, (time.perf_counter() - started) * 1000, results, charged)
     return ExecuteResponse(results=results)
 
 
-async def _record_usage(owner: accounts.KeyOwner, duration_ms: float, results: List[TaskResult]) -> None:
+async def _record_usage(owner: accounts.KeyOwner, duration_ms: float, results: List[TaskResult],
+                        credits_charged: int) -> None:
     # Only the operation name (registered names only), outcome and timing are recorded.
     entries = [{"operation": r.operation if r.operation in OPERATIONS else "unknown",
                 "status": r.status, "error_type": r.error_type, "duration_ms": r.duration_ms}
                for r in results]
     try:
         await asyncio.get_running_loop().run_in_executor(
-            _executor, accounts.record_usage, owner, round(duration_ms, 1), entries)
+            _executor, accounts.record_usage, owner, round(duration_ms, 1), entries, credits_charged)
     except Exception as exc:  # the work is done; don't fail the response, but make it visible
         log.error("usage recording failed for key %s: %s", owner.key_id, type(exc).__name__)

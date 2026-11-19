@@ -12,6 +12,9 @@ pillow>=10
 psycopg[binary]==3.3.9
 psycopg-pool==3.3.3
 
+# Prepaid credits (Stripe Checkout + webhooks)
+stripe==17.1.0
+
 # Libraries (one operation each)
 rapidfuzz==3.14.6
 # hnswlib publishes only a source distribution: Linux builds it with g++ (see Dockerfile).

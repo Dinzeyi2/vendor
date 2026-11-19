@@ -51,6 +51,9 @@ def create_key(customer_id: str, name: str) -> Dict[str, Any]:
     key_id = uuid.uuid4()
     with pool().connection() as conn:
         conn.execute("INSERT INTO customers (id) VALUES (%s) ON CONFLICT (id) DO NOTHING", (customer_id,))
+        # New accounts start with a 0 balance; an existing balance is never touched by key changes.
+        conn.execute("INSERT INTO credit_accounts (customer_id) VALUES (%s) ON CONFLICT (customer_id) DO NOTHING",
+                     (customer_id,))
         # Lock the customer row so concurrent creates can't exceed the active-key limit.
         conn.execute("SELECT 1 FROM customers WHERE id = %s FOR UPDATE", (customer_id,))
         active = conn.execute("SELECT count(*) FROM api_keys WHERE customer_id = %s AND revoked_at IS NULL",
@@ -92,7 +95,8 @@ def authenticate_key(secret: str) -> Optional[KeyOwner]:
 
 
 # -- usage -------------------------------------------------------------------
-def record_usage(owner: KeyOwner, duration_ms: float, results: Sequence[Dict[str, Any]]) -> uuid.UUID:
+def record_usage(owner: KeyOwner, duration_ms: float, results: Sequence[Dict[str, Any]],
+                 credits_charged: int = 0) -> uuid.UUID:
     """One usage_requests row plus one usage_operations row per task.
 
     `results` items carry only: operation (a registered name or "unknown"), status,
@@ -102,9 +106,10 @@ def record_usage(owner: KeyOwner, duration_ms: float, results: Sequence[Dict[str
     ok = sum(1 for r in results if r["status"] == "ok")
     with pool().connection() as conn:
         conn.execute(
-            "INSERT INTO usage_requests (id, customer_id, key_id, task_count, ok_count, error_count, duration_ms) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            (request_id, owner.customer_id, owner.key_id, len(results), ok, len(results) - ok, duration_ms))
+            "INSERT INTO usage_requests (id, customer_id, key_id, task_count, ok_count, error_count, duration_ms, "
+            "credits_charged) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (request_id, owner.customer_id, owner.key_id, len(results), ok, len(results) - ok, duration_ms,
+             credits_charged))
         with conn.cursor() as cur:
             cur.executemany(
                 "INSERT INTO usage_operations (request_id, customer_id, key_id, operation, status, error_type, duration_ms) "
@@ -121,7 +126,8 @@ def usage_report(customer_id: str, start: datetime, end: datetime, key_id: Optio
     p = {"c": customer_id, "start": start, "end": end, "key_id": key_id}
     window = f"customer_id = %(c)s AND created_at >= %(start)s AND created_at < %(end)s {key_filter}"
     with pool().connection() as conn:
-        req_count = conn.execute(f"SELECT count(*) FROM usage_requests WHERE {window}", p).fetchone()[0]
+        req_count, credits = conn.execute(
+            f"SELECT count(*), COALESCE(sum(credits_charged), 0) FROM usage_requests WHERE {window}", p).fetchone()
         ops, ok, err = conn.execute(
             f"SELECT count(*), count(*) FILTER (WHERE status = 'ok'), count(*) FILTER (WHERE status = 'error') "
             f"FROM usage_operations WHERE {window}", p).fetchone()
@@ -139,7 +145,7 @@ def usage_report(customer_id: str, start: datetime, end: datetime, key_id: Optio
             f"SELECT (created_at AT TIME ZONE 'UTC')::date AS day, count(DISTINCT request_id), count(*) "
             f"FROM usage_operations WHERE {window} GROUP BY day ORDER BY day", p).fetchall()
         recent = conn.execute(
-            f"SELECT id, key_id, created_at, task_count, ok_count, error_count, duration_ms FROM usage_requests "
+            f"SELECT id, key_id, created_at, task_count, ok_count, error_count, duration_ms, credits_charged FROM usage_requests "
             f"WHERE {window} ORDER BY created_at DESC LIMIT %(lim)s", {**p, "lim": recent_limit}).fetchall()
         ops_by_req: Dict[uuid.UUID, List[Dict[str, Any]]] = {}
         if recent:
@@ -151,7 +157,8 @@ def usage_report(customer_id: str, start: datetime, end: datetime, key_id: Optio
                     {"operation": op, "status": status, "error_type": etype, "duration_ms": round(dur, 1)})
     return {
         "start": start, "end": end, "key_id": str(key_id) if key_id else None,
-        "totals": {"requests": req_count, "operations": ops, "operations_ok": ok, "operations_error": err},
+        "totals": {"requests": req_count, "operations": ops, "operations_ok": ok, "operations_error": err,
+                   "credits_charged": int(credits)},
         "by_operation": [{"operation": o, "count": c, "ok": k, "error": e, "avg_duration_ms": round(a or 0, 1)}
                          for o, c, k, e, a in by_op],
         "by_key": [{"key_id": str(i), "name": n, "prefix": pf, "status": "revoked" if rv else "active",
@@ -159,6 +166,7 @@ def usage_report(customer_id: str, start: datetime, end: datetime, key_id: Optio
         "by_day": [{"date": d.isoformat(), "requests": rq, "operations": oc} for d, rq, oc in by_day],
         "recent_requests": [
             {"id": str(i), "key_id": str(k), "created_at": t, "task_count": tc, "ok_count": oc,
-             "error_count": ec, "duration_ms": round(d, 1), "operations": ops_by_req.get(i, [])}
-            for i, k, t, tc, oc, ec, d in recent],
+             "error_count": ec, "duration_ms": round(d, 1), "credits_charged": cc,
+             "operations": ops_by_req.get(i, [])}
+            for i, k, t, tc, oc, ec, d, cc in recent],
     }

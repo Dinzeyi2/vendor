@@ -19,7 +19,7 @@ import re
 import subprocess
 import threading
 import time
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Callable, Deque, Dict, List, Optional
 
 from app.config import ROOT
 
@@ -52,9 +52,10 @@ def worker_env(extra: Dict[str, str]) -> Dict[str, str]:
 
 
 class WorkerFailure(Exception):
-    def __init__(self, error_type: str, message: str):
+    def __init__(self, error_type: str, message: str, started: bool = False):
         super().__init__(message)
         self.error_type = error_type
+        self.started = started  # whether the operation had been handed to the worker
 
 
 class _Run:
@@ -178,10 +179,14 @@ class WorkerProcess:
         return msg
 
     # -- calls ---------------------------------------------------------
-    def call(self, op: str, inputs: Dict[str, Any], timeout: float) -> Any:
+    def call(self, op: str, inputs: Dict[str, Any], timeout: float,
+             on_start: Optional[Callable[[], None]] = None) -> Any:
+        """Run one operation. `on_start` fires once the request has been handed to a live worker;
+        failures before that point (busy timeout, spawn failure, dead pipe) mean it never started."""
         deadline = time.monotonic() + timeout
         if not self._lock.acquire(timeout=timeout):
-            raise WorkerFailure("timeout", f"worker '{self.name}' stayed busy for {timeout:g}s")
+            raise WorkerFailure("timeout", f"worker '{self.name}' stayed busy for {timeout:g}s", started=False)
+        started = False
         try:
             if not self.alive:
                 self._spawn(deadline)
@@ -192,6 +197,9 @@ class WorkerProcess:
                 self._run.proc.stdin.flush()
             except OSError as exc:
                 raise WorkerFailure("worker_crashed", f"worker '{self.name}' is not accepting input: {exc}")
+            started = True
+            if on_start is not None:
+                on_start()
             msg = self._next(deadline, f"running {op}")
             while msg.get("id") != rid:  # skip anything stale
                 msg = self._next(deadline, f"running {op}")
@@ -199,12 +207,13 @@ class WorkerProcess:
                 return msg.get("output")
             raise WorkerFailure(msg.get("error_type", "operation_failed"), msg.get("error", "unknown error"))
         except WorkerFailure as exc:
+            exc.started = started
             if exc.error_type in ("timeout", "worker_crashed"):
                 self.kill()
             raise
         except Exception as exc:
             self.kill()
-            raise WorkerFailure("worker_crashed", f"worker '{self.name}' failed: {exc}") from exc
+            raise WorkerFailure("worker_crashed", f"worker '{self.name}' failed: {exc}", started=started) from exc
         finally:
             self._lock.release()
 

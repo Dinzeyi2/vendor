@@ -120,7 +120,8 @@ def test_usage_recorded_per_request_and_operation(monkeypatch):
     assert "OTHER-CUSTOMER-DATA" not in by_id["t3"]["error"]  # worker stderr hidden from customers
 
     u = client.get("/v1/account/usage", headers=site(c)).json()
-    assert u["totals"] == {"requests": 1, "operations": 3, "operations_ok": 1, "operations_error": 2}
+    assert u["totals"] == {"requests": 1, "operations": 3, "operations_ok": 1, "operations_error": 2,
+                           "credits_charged": 0}  # BILLING_MODE unset: nothing is charged
     assert {o["operation"] for o in u["by_operation"]} == {"rapidfuzz.compare", "unknown", "scs.solve"}
     req = u["recent_requests"][0]
     assert req["key_id"] == k["id"] and req["task_count"] == 3 and len(req["operations"]) == 3

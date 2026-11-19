@@ -39,3 +39,5 @@ def exit_clean(_inputs):
 
 OPERATIONS = {"echo": echo, "sleep": sleep, "crash": crash, "bad": bad, "boom": boom,
               "env_probe": env_probe, "exit_clean": exit_clean}
+# Names used when tests register these as API operations (tests/test_billing.py).
+OPERATIONS.update({"test.echo": echo, "test.sleep": sleep, "test.crash": crash})

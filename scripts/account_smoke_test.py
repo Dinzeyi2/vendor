@@ -77,6 +77,13 @@ check("A creates key 2 -> 201", s == 201, f"prefix {a2.get('prefix')}")
 s, b1 = call("POST", "/v1/account/keys", headers=site(B), body={"name": "B primary"})
 check("B creates key -> 201", s == 201, f"prefix {b1.get('prefix')}")
 check("customer key cannot call account API -> 401", call("GET", "/v1/account/keys", headers=site(A, a1["secret"]))[0] == 401)
+_, credits = call("GET", "/v1/account/credits", headers=site(A))
+if credits and credits.get("billing_mode") in ("test", "live"):  # credits are enforced: grant test credits
+    assert OPERATOR, "billing is enforced: set API_KEY (operator) so the test can grant credits"
+    for cust, n in ((A, 200), (B, 10)):
+        s, _ = call("POST", "/v1/admin/credits/adjust", headers={"X-API-Key": OPERATOR},
+                    body={"customer_id": cust, "delta": n, "note": "account smoke test"})
+        check(f"granted {n} test credits to {cust[:12]}... (billing_mode={credits['billing_mode']})", s == 200)
 _, la = call("GET", "/v1/account/keys", headers=site(A))
 _, lb = call("GET", "/v1/account/keys", headers=site(B))
 check("A lists exactly its 2 keys", sorted(k["id"] for k in la["keys"]) == sorted([a1["id"], a2["id"]]))
@@ -104,7 +111,8 @@ print("\n== usage")
 _, ua = call("GET", "/v1/account/usage", headers=site(A))
 _, ub = call("GET", "/v1/account/usage", headers=site(B))
 check("A totals: 2 requests, 12 operations (11 ok, 1 error)",
-      ua["totals"] == {"requests": 2, "operations": 12, "operations_ok": 11, "operations_error": 1}, ua["totals"])
+      {k: ua["totals"][k] for k in ("requests", "operations", "operations_ok", "operations_error")}
+      == {"requests": 2, "operations": 12, "operations_ok": 11, "operations_error": 1}, ua["totals"])
 check("A by_operation covers all 10 operations + 'unknown'",
       {o["operation"] for o in ua["by_operation"]} == set(smoke_test.CASES) | {"unknown"})
 byk = {k["key_id"]: k for k in ua["by_key"]}
