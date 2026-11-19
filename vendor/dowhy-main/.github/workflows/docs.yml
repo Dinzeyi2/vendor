@@ -1,0 +1,70 @@
+name: Build & Deploy Docs
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/docs.yml"
+      - "dowhy/**"
+      - "docs/**"
+      - "pyproject.toml"
+      - "poetry.lock"
+  workflow_run:
+    workflows: [ "Build Docker image (docs)" ]
+    types:
+      - completed
+
+jobs:
+  docs:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+          
+      - name: Set up Python 3.11
+        id: setup-python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc g++ pkg-config libgraphviz-dev graphviz-dev graphviz nodejs npm pandoc
+
+
+      - name: Install Poetry
+        run: '"${{ steps.setup-python.outputs.python-path }}" -m pip install poetry'
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc g++ pkg-config libgraphviz-dev graphviz-dev graphviz nodejs npm pandoc
+
+      - name: Install Poetry
+        run: '"${{ steps.setup-python.outputs.python-path }}" -m pip install poetry'
+
+      - name: Install Python Dependencies
+        env:
+          VIRTUALENV_PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        run: |
+          echo "VIRTUALENV_PYTHON=$VIRTUALENV_PYTHON" >> "$GITHUB_ENV"
+          poetry env use "${{ steps.setup-python.outputs.python-path }}"
+          poetry run python -c "import sys; print(sys.executable, sys.version); assert sys.version.split()[0] == '${{ steps.setup-python.outputs.python-version }}', sys.version"
+          poetry install -E plotting -E pydot -E pygraphviz -E econml --with docs
+
+      - name: Build
+        run: ./docs/generate_docs.sh
+
+      - name: Commit and push to gh-pages branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dowhy-docs/main
+          destination_dir: ./main

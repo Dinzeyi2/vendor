@@ -1,0 +1,52 @@
+[package]
+name = "rapier-examples-3d"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+default-run = "all_examples3"
+publish = false
+
+[features]
+parallel = ["rapier3d/parallel", "rapier_testbed3d/parallel"]
+enhanced-determinism = ["rapier3d/enhanced-determinism"]
+
+[dependencies]
+anyhow.workspace = true
+rand.workspace = true
+getrandom.workspace = true
+wasm-bindgen.workspace = true
+obj-rs.workspace = true
+serde = { workspace = true, features = ["std"] }
+bincode.workspace = true
+serde_json.workspace = true
+dot_vox.workspace = true
+glam.workspace = true
+kiss3d = { workspace = true, features = ["rt_switcher"] }
+
+[dependencies.rapier_testbed3d]
+workspace = true
+features = ["fem"]
+
+[dependencies.rapier3d]
+workspace = true
+features = ["fem"]
+
+[dependencies.rapier3d-urdf]
+workspace = true
+features = ["stl"]
+
+[dependencies.rapier3d-mjcf]
+workspace = true
+features = ["stl", "wavefront"]
+
+[[bin]]
+name = "all_examples3"
+path = "./all_examples3.rs"
+
+[[bin]]
+name = "harness_capsules3"
+path = "./harness_capsules3.rs"
+
+#[lib]
+#crate-type = ["cdylib", "rlib"]
+#path = "./all_examples3_wasm.rs"

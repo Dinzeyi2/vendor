@@ -1,0 +1,5 @@
+<solver>
+  <termination>
+    <scoreCalculationCountLimit>50</scoreCalculationCountLimit>
+  </termination>
+</solver>

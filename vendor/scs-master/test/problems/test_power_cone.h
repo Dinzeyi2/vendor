@@ -1,0 +1,548 @@
+#include "glbopts.h"
+#include "linalg.h"
+#include "minunit.h"
+#include "problem_utils.h"
+#include "scs.h"
+#include "util.h"
+
+/*
+ * Power cone test: maximize t = (x1 * x2)^0.5 subject to x1 + x2 = 4.
+ * Equivalently: min -t s.t. (x1, x2, t) in K_pow(0.5), x1+x2=4.
+ * Optimal: x1 = x2 = 2, t = 2, obj = -2.
+ *
+ * SCS form: min c'v, Av + s = b, s in K
+ * Variables v = [x1, x2, t] (n=3), m=4
+ * Constraints:
+ *   Row 0 (zero cone):  x1 + x2 = 4
+ *   Rows 1-3 (power):   s[1:4] = (x1, x2, t) in K_pow(0.5)
+ *
+ * A cols (CSC):
+ *   col 0 (x1): row 0 -> +1, row 1 -> -1
+ *   col 1 (x2): row 0 -> +1, row 2 -> -1
+ *   col 2 (t):  row 3 -> -1
+ */
+static const char *test_power_cone(void) {
+  ScsCone *k = (ScsCone *)scs_calloc(1, sizeof(ScsCone));
+  ScsData *d = (ScsData *)scs_calloc(1, sizeof(ScsData));
+  ScsSettings *stgs = (ScsSettings *)scs_calloc(1, sizeof(ScsSettings));
+  ScsSolution *sol = (ScsSolution *)scs_calloc(1, sizeof(ScsSolution));
+  ScsInfo info = {0};
+  scs_int exitflag;
+  scs_float perr, derr;
+  scs_int success;
+  const char *fail;
+
+  scs_float opt = -2.0;
+
+  scs_float Ax[] = {1.0, -1.0, 1.0, -1.0, -1.0};
+  scs_int Ai[]   = {0, 1, 0, 2, 3};
+  scs_int Ap[]   = {0, 2, 4, 5};
+
+  scs_float b[] = {4.0, 0.0, 0.0, 0.0};
+  scs_float c[] = {0.0, 0.0, -1.0};
+
+  scs_float p[] = {0.5};
+
+  scs_int m = 4, n = 3;
+
+  d->m = m;
+  d->n = n;
+  d->b = b;
+  d->c = c;
+
+  d->A = (ScsMatrix *)scs_calloc(1, sizeof(ScsMatrix));
+  d->A->m = m;
+  d->A->n = n;
+  d->A->x = Ax;
+  d->A->i = Ai;
+  d->A->p = Ap;
+
+  k->z = 1;
+  k->psize = 1;
+  k->p = p;
+
+  scs_set_default_settings(stgs);
+  stgs->eps_abs = 1e-6;
+  stgs->eps_rel = 1e-6;
+
+  exitflag = scs(d, k, stgs, sol, &info);
+
+  perr = info.pobj - opt;
+  derr = info.dobj - opt;
+
+  scs_printf("primal obj error %4e\n", perr);
+  scs_printf("dual obj error %4e\n", derr);
+
+  success = ABS(perr) < SOL_TOL && ABS(derr) < SOL_TOL &&
+            exitflag == SCS_SOLVED;
+  mu_assert("test_power_cone: SCS failed to produce SCS_SOLVED", success);
+  fail = verify_solution_correct(d, k, stgs, &info, sol, exitflag);
+
+  /* warm start */
+  stgs->warm_start = 1;
+  exitflag = scs(d, k, stgs, sol, &info);
+  mu_assert("test_power_cone: warm-start failure", info.iter <= 25);
+  success = ABS(info.pobj - opt) < SOL_TOL && exitflag == SCS_SOLVED;
+  mu_assert("test_power_cone: SCS warm-start failed", success);
+
+  SCS(free_sol)(sol);
+  scs_free(d->A);
+  scs_free(k);
+  scs_free(stgs);
+  scs_free(d);
+  return fail;
+}
+
+/*
+ * Power cone test with p=0.9: exercises a non-symmetric power parameter.
+ * Problem: maximize t = x^0.9 * y^0.1  s.t.  x = 1,  y = 1.
+ * K_pow(0.9): x^0.9 * y^0.1 >= |t|, x,y >= 0.
+ * Optimal: t* = 1^0.9 * 1^0.1 = 1,  obj = -1.
+ *
+ * Variables [x, y, t] (n=3), m=5:
+ *   Row 0 (zero): x = 1  -> A[0,0]=1, b[0]=1
+ *   Row 1 (zero): y = 1  -> A[1,1]=1, b[1]=1
+ *   Rows 2-4 (power p=0.9): (x, y, t) in K_pow(0.9)
+ *
+ * A cols (CSC):
+ *   col 0 (x): row 0 -> +1, row 2 -> -1
+ *   col 1 (y): row 1 -> +1, row 3 -> -1
+ *   col 2 (t): row 4 -> -1
+ */
+static const char *test_power_cone_p09(void) {
+  ScsCone *k = (ScsCone *)scs_calloc(1, sizeof(ScsCone));
+  ScsData *d = (ScsData *)scs_calloc(1, sizeof(ScsData));
+  ScsSettings *stgs = (ScsSettings *)scs_calloc(1, sizeof(ScsSettings));
+  ScsSolution *sol = (ScsSolution *)scs_calloc(1, sizeof(ScsSolution));
+  ScsInfo info = {0};
+  scs_int exitflag;
+  scs_float perr, derr;
+  scs_int success;
+  const char *fail;
+
+  scs_float opt = -1.0; /* 1^0.9 * 1^0.1 = 1 */
+
+  scs_float Ax_p[] = {1.0, -1.0, 1.0, -1.0, -1.0};
+  scs_int Ai_p[]   = {0, 2, 1, 3, 4};
+  scs_int Ap_p[]   = {0, 2, 4, 5};
+
+  scs_float b_p[] = {1.0, 1.0, 0.0, 0.0, 0.0};
+  scs_float c_p[] = {0.0, 0.0, -1.0};
+
+  scs_float pp[] = {0.9};
+
+  scs_int m = 5, n = 3;
+
+  d->m = m;
+  d->n = n;
+  d->b = b_p;
+  d->c = c_p;
+
+  d->A = (ScsMatrix *)scs_calloc(1, sizeof(ScsMatrix));
+  d->A->m = m;
+  d->A->n = n;
+  d->A->x = Ax_p;
+  d->A->i = Ai_p;
+  d->A->p = Ap_p;
+
+  k->z = 2;
+  k->psize = 1;
+  k->p = pp;
+
+  scs_set_default_settings(stgs);
+  stgs->eps_abs = 1e-6;
+  stgs->eps_rel = 1e-6;
+
+  exitflag = scs(d, k, stgs, sol, &info);
+
+  perr = info.pobj - opt;
+  derr = info.dobj - opt;
+
+  scs_printf("primal obj error %4e\n", perr);
+  scs_printf("dual obj error %4e\n", derr);
+
+  success = ABS(perr) < SOL_TOL && ABS(derr) < SOL_TOL &&
+            exitflag == SCS_SOLVED;
+  mu_assert("test_power_cone_p09: SCS failed to produce SCS_SOLVED", success);
+  fail = verify_solution_correct(d, k, stgs, &info, sol, exitflag);
+
+  SCS(free_sol)(sol);
+  scs_free(d->A);
+  scs_free(k);
+  scs_free(stgs);
+  scs_free(d);
+  return fail;
+}
+
+/*
+ * Dual power cone test (p < 0 in SCS signals dual cone).
+ *
+ * For p[i] < 0, cones.c projects onto the dual of K_pow(-p[i]) via Moreau:
+ * Pi_{K*}(x) = x + Pi_K(-x).
+ *
+ * K_pow(0.5)* = {(u,v,w): 2*sqrt(u*v) >= |w|, u,v >= 0}.
+ * Problem: maximize w  s.t.  (u, v, w) in K_pow(0.5)*,  u = 1,  v = 1.
+ * With u=v=1: max w = 2*sqrt(1) = 2,  obj = -2.
+ *
+ * Variables [u, v, w] (n=3), m=5:
+ *   Row 0 (zero): u = 1  -> A[0,0]=1, b[0]=1
+ *   Row 1 (zero): v = 1  -> A[1,1]=1, b[1]=1
+ *   Rows 2-4 (dual power p=-0.5): (u, v, w) in K_pow(0.5)*
+ *
+ * A cols (CSC):
+ *   col 0 (u): row 0 -> +1, row 2 -> -1
+ *   col 1 (v): row 1 -> +1, row 3 -> -1
+ *   col 2 (w): row 4 -> -1
+ */
+static const char *test_dual_power_cone(void) {
+  ScsCone *k = (ScsCone *)scs_calloc(1, sizeof(ScsCone));
+  ScsData *d = (ScsData *)scs_calloc(1, sizeof(ScsData));
+  ScsSettings *stgs = (ScsSettings *)scs_calloc(1, sizeof(ScsSettings));
+  ScsSolution *sol = (ScsSolution *)scs_calloc(1, sizeof(ScsSolution));
+  ScsInfo info = {0};
+  scs_int exitflag;
+  scs_float perr, derr;
+  scs_int success;
+  const char *fail;
+
+  scs_float opt = -2.0;
+
+  scs_float Ax_d[] = {1.0, -1.0, 1.0, -1.0, -1.0};
+  scs_int Ai_d[]   = {0, 2, 1, 3, 4};
+  scs_int Ap_d[]   = {0, 2, 4, 5};
+
+  scs_float b_d[] = {1.0, 1.0, 0.0, 0.0, 0.0};
+  scs_float c_d[] = {0.0, 0.0, -1.0};
+
+  scs_float pd[] = {-0.5}; /* negative = dual of K_pow(0.5) */
+
+  scs_int m = 5, n = 3;
+
+  d->m = m;
+  d->n = n;
+  d->b = b_d;
+  d->c = c_d;
+
+  d->A = (ScsMatrix *)scs_calloc(1, sizeof(ScsMatrix));
+  d->A->m = m;
+  d->A->n = n;
+  d->A->x = Ax_d;
+  d->A->i = Ai_d;
+  d->A->p = Ap_d;
+
+  k->z = 2;
+  k->psize = 1;
+  k->p = pd;
+
+  scs_set_default_settings(stgs);
+  stgs->eps_abs = 1e-6;
+  stgs->eps_rel = 1e-6;
+
+  exitflag = scs(d, k, stgs, sol, &info);
+
+  perr = info.pobj - opt;
+  derr = info.dobj - opt;
+
+  scs_printf("primal obj error %4e\n", perr);
+  scs_printf("dual obj error %4e\n", derr);
+
+  success = ABS(perr) < SOL_TOL && ABS(derr) < SOL_TOL &&
+            exitflag == SCS_SOLVED;
+  mu_assert("test_dual_power_cone: SCS failed to produce SCS_SOLVED", success);
+  fail = verify_solution_correct(d, k, stgs, &info, sol, exitflag);
+
+  SCS(free_sol)(sol);
+  scs_free(d->A);
+  scs_free(k);
+  scs_free(stgs);
+  scs_free(d);
+  return fail;
+}
+
+/*
+ * Infeasible power cone: (x, y, z) in K_pow(0.5) with x = -1 (impossible
+ * since x must be >= 0 in the power cone).
+ *
+ * Variables v = [x, y, z] (n=3), m=4
+ *   Row 0 (zero cone): x = -1   → A[0,0]=1, b[0]=-1, s[0]=0 → x=-1
+ *   Rows 1-3 (power):  s[1:4] = (x, y, z) in K_pow(0.5)
+ *
+ * A:
+ *   col 0 (x): row 0 -> +1, row 1 -> -1
+ *   col 1 (y): row 2 -> -1
+ *   col 2 (z): row 3 -> -1
+ */
+static const char *test_power_cone_infeasible(void) {
+  ScsCone *k = (ScsCone *)scs_calloc(1, sizeof(ScsCone));
+  ScsData *d = (ScsData *)scs_calloc(1, sizeof(ScsData));
+  ScsSettings *stgs = (ScsSettings *)scs_calloc(1, sizeof(ScsSettings));
+  ScsSolution *sol = (ScsSolution *)scs_calloc(1, sizeof(ScsSolution));
+  ScsInfo info = {0};
+  scs_int exitflag;
+  const char *fail;
+
+  scs_float Ax[] = {1.0, -1.0, -1.0, -1.0};
+  scs_int Ai[]   = {0, 1, 2, 3};
+  scs_int Ap[]   = {0, 2, 3, 4};
+
+  scs_float b[] = {-1.0, 0.0, 0.0, 0.0};
+  scs_float c[] = {0.0, 0.0, -1.0};
+
+  scs_float p[] = {0.5};
+
+  scs_int m = 4, n = 3;
+
+  d->m = m;
+  d->n = n;
+  d->b = b;
+  d->c = c;
+
+  d->A = (ScsMatrix *)scs_calloc(1, sizeof(ScsMatrix));
+  d->A->m = m;
+  d->A->n = n;
+  d->A->x = Ax;
+  d->A->i = Ai;
+  d->A->p = Ap;
+
+  k->z = 1;
+  k->psize = 1;
+  k->p = p;
+
+  scs_set_default_settings(stgs);
+  stgs->eps_abs = 1e-6;
+  stgs->eps_rel = 1e-6;
+  stgs->eps_infeas = 1e-9;
+
+  exitflag = scs(d, k, stgs, sol, &info);
+
+  mu_assert("test_power_cone_infeasible: expected SCS_INFEASIBLE",
+            exitflag == SCS_INFEASIBLE);
+  fail = verify_solution_correct(d, k, stgs, &info, sol, exitflag);
+
+  SCS(free_sol)(sol);
+  scs_free(d->A);
+  scs_free(k);
+  scs_free(stgs);
+  scs_free(d);
+  return fail;
+}
+
+/*
+ * Multiple power cones test (psize=2): exercises the loop over k->psize in
+ * proj_cones, including both primal and dual cone variants.
+ *
+ * Two independent power cone constraints:
+ *   Cone 1 (p=0.5):  (x1, x2, t1) in K_pow(0.5),  x1=1, x2=1 -> t1*=1
+ *   Cone 2 (p=-0.5): (y1, y2, t2) in K_pow(0.5)*, y1=1, y2=1 -> t2*=2
+ * (Dual K_pow(0.5)*: 2*sqrt(y1*y2) >= |t2|, so t2* = 2*sqrt(1) = 2.)
+ *
+ * Problem: minimize -(t1 + t2)
+ * Optimal: t1* = 1, t2* = 2, obj* = -3.
+ *
+ * Variables [x1, x2, t1, y1, y2, t2] (n=6), m=10:
+ *   Rows 0-3 (z=4):  x1=1, x2=1, y1=1, y2=1
+ *   Rows 4-6 (p=0.5):  (x1, x2, t1)
+ *   Rows 7-9 (p=-0.5): (y1, y2, t2)
+ *
+ * A cols (CSC):
+ *   col 0 (x1): row 0 -> +1, row 4 -> -1
+ *   col 1 (x2): row 1 -> +1, row 5 -> -1
+ *   col 2 (t1): row 6 -> -1
+ *   col 3 (y1): row 2 -> +1, row 7 -> -1
+ *   col 4 (y2): row 3 -> +1, row 8 -> -1
+ *   col 5 (t2): row 9 -> -1
+ */
+static const char *test_multi_power(void) {
+  ScsCone *k = (ScsCone *)scs_calloc(1, sizeof(ScsCone));
+  ScsData *d = (ScsData *)scs_calloc(1, sizeof(ScsData));
+  ScsSettings *stgs = (ScsSettings *)scs_calloc(1, sizeof(ScsSettings));
+  ScsSolution *sol = (ScsSolution *)scs_calloc(1, sizeof(ScsSolution));
+  ScsInfo info = {0};
+  scs_int exitflag;
+  scs_float perr, derr;
+  scs_int success;
+  const char *fail;
+
+  scs_float opt = -3.0;
+
+  scs_float Axmp[] = {1.0,-1.0, 1.0,-1.0, -1.0, 1.0,-1.0, 1.0,-1.0, -1.0};
+  scs_int Aimp[]   = {0, 4, 1, 5, 6, 2, 7, 3, 8, 9};
+  scs_int Apmp[]   = {0, 2, 4, 5, 7, 9, 10};
+
+  scs_float bmp[] = {1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+  scs_float cmp[] = {0.0, 0.0, -1.0, 0.0, 0.0, -1.0};
+
+  scs_float pmp[] = {0.5, -0.5}; /* primal K_pow(0.5) then dual K_pow(0.5)* */
+
+  scs_int m = 10, n = 6;
+
+  d->m = m;
+  d->n = n;
+  d->b = bmp;
+  d->c = cmp;
+
+  d->A = (ScsMatrix *)scs_calloc(1, sizeof(ScsMatrix));
+  d->A->m = m;
+  d->A->n = n;
+  d->A->x = Axmp;
+  d->A->i = Aimp;
+  d->A->p = Apmp;
+
+  k->z = 4;
+  k->psize = 2;
+  k->p = pmp;
+
+  scs_set_default_settings(stgs);
+  stgs->eps_abs = 1e-6;
+  stgs->eps_rel = 1e-6;
+
+  exitflag = scs(d, k, stgs, sol, &info);
+
+  perr = info.pobj - opt;
+  derr = info.dobj - opt;
+
+  scs_printf("primal obj error %4e\n", perr);
+  scs_printf("dual obj error %4e\n", derr);
+
+  success = ABS(perr) < SOL_TOL && ABS(derr) < SOL_TOL &&
+            exitflag == SCS_SOLVED;
+  mu_assert("test_multi_power: SCS failed to produce SCS_SOLVED", success);
+  fail = verify_solution_correct(d, k, stgs, &info, sol, exitflag);
+
+  SCS(free_sol)(sol);
+  scs_free(d->A);
+  scs_free(k);
+  scs_free(stgs);
+  scs_free(d);
+  return fail;
+}
+
+/*
+ * Regression test for issue #491: the power cone projection used absolute
+ * tolerances, so when the (homogeneous, normalized) iterates were tiny the
+ * Newton solve stopped early and SCS returned SCS_SOLVED with the slack well
+ * outside the cone.
+ *
+ * Problem: minimize -1000 x  s.t.  (100, 0.01, x) in K_pow(0.25).
+ * K_pow(0.25): u^0.25 * v^0.75 >= |z|, so x* = 100^0.25 * 0.01^0.75 = 0.1.
+ *
+ * Variables [x] (n=1), m=3:
+ *   Rows 0-2 (power p=0.25): s = b - A x = (100, 0.01, x)
+ *
+ * A cols (CSC):
+ *   col 0 (x): row 2 -> -1
+ */
+static const char *test_power_cone_small_scale(void) {
+#ifdef SFLOAT
+  /* Checks x and the cone violation to 1e-6 with c = 1000 and b = 100, and in
+   * single precision the gap stalls near 1e-3 relative, with the status and
+   * the error both depending on the platform's rounding. */
+  return mu_skipped;
+#endif
+  ScsCone *k = (ScsCone *)scs_calloc(1, sizeof(ScsCone));
+  ScsData *d = (ScsData *)scs_calloc(1, sizeof(ScsData));
+  ScsSettings *stgs = (ScsSettings *)scs_calloc(1, sizeof(ScsSettings));
+  ScsSolution *sol = (ScsSolution *)scs_calloc(1, sizeof(ScsSolution));
+  ScsInfo info = {0};
+  scs_int exitflag;
+  scs_float viol;
+  scs_int success;
+  const char *fail;
+
+  scs_float xopt = 0.1;
+
+  scs_float Axs[] = {-1.0};
+  scs_int Ais[]   = {2};
+  scs_int Aps[]   = {0, 1};
+
+  scs_float bs[] = {100.0, 0.01, 0.0};
+  scs_float cs[] = {-1000.0};
+
+  scs_float ps[] = {0.25};
+
+  scs_int m = 3, n = 1;
+
+  d->m = m;
+  d->n = n;
+  d->b = bs;
+  d->c = cs;
+
+  d->A = (ScsMatrix *)scs_calloc(1, sizeof(ScsMatrix));
+  d->A->m = m;
+  d->A->n = n;
+  d->A->x = Axs;
+  d->A->i = Ais;
+  d->A->p = Aps;
+
+  k->psize = 1;
+  k->p = ps;
+
+  scs_set_default_settings(stgs);
+  stgs->eps_abs = 1e-8;
+  stgs->eps_rel = 1e-8;
+
+  exitflag = scs(d, k, stgs, sol, &info);
+
+  /* cone violation of s = (u, v, z): |z| - u^0.25 * v^0.75 */
+  viol = ABS(sol->s[2]) - POWF(MAX(sol->s[0], 0.), 0.25) *
+                              POWF(MAX(sol->s[1], 0.), 0.75);
+
+  scs_printf("x error %4e\n", sol->x[0] - xopt);
+  scs_printf("cone violation %4e\n", viol);
+
+  success = exitflag == SCS_SOLVED && ABS(sol->x[0] - xopt) < 1e-6 &&
+            viol < 1e-6;
+  mu_assert("test_power_cone_small_scale: slack outside cone or wrong x",
+            success);
+  fail = verify_solution_correct(d, k, stgs, &info, sol, exitflag);
+
+  SCS(free_sol)(sol);
+  scs_free(d->A);
+  scs_free(k);
+  scs_free(stgs);
+  scs_free(d);
+  return fail;
+}
+
+/*
+ * Projection onto the power cone of points just outside it with one tiny
+ * positive component and p near 0 or 1. Starting the Newton solve at
+ * r = rh there makes the first step too small to represent, which was
+ * mistaken for convergence and returned v unprojected. Reference values
+ * are from a 60-digit bisection and satisfy the projection's optimality
+ * conditions.
+ *
+ * P_K(v) is computed from the dual projection via Moreau: v + P_K*(-v).
+ */
+static const char *test_power_cone_proj_tiny_component(void) {
+  scs_float ps[] = {0.001, 0.001, 0.999};
+  scs_float vs[][3] = {{1e-12, 1.0, 1.8482197251762336},
+                       {1e-9, 1.0, 1.8610309722765279},
+                       {1.0, 1e-12, -1.8482197251762336}};
+  scs_float refs[][3] = {
+      {0.024656240189987407, 1.42591697797449, 1.4201429843158235},
+      {0.024896473072648813, 1.4323167445745537, 1.4265242797926461},
+      {1.42591697797449, 0.024656240189987418, -1.4201429843158235}};
+  scs_float t[3], err;
+  scs_int i, j;
+  ScsCone *k = (ScsCone *)scs_calloc(1, sizeof(ScsCone));
+  ScsConeWork *c;
+
+  k->psize = 1;
+  for (i = 0; i < 3; ++i) {
+    k->p = &(ps[i]);
+    c = SCS(init_cone)(k, 3);
+    for (j = 0; j < 3; ++j)
+      t[j] = -vs[i][j];
+    SCS(proj_dual_cone)(t, c, SCS_NULL, SCS_NULL);
+    SCS(finish_cone)(c);
+    err = 0;
+    for (j = 0; j < 3; ++j)
+      err = MAX(err, ABS(t[j] + vs[i][j] - refs[i][j]));
+    scs_printf("power cone projection %i error %4e\n", (int)i, err);
+    mu_assert_less("test_power_cone_proj_tiny_component: projection error",
+                   err, VERIFY_TOL(1e-9, 1e-4));
+  }
+  scs_free(k);
+  return 0;
+}

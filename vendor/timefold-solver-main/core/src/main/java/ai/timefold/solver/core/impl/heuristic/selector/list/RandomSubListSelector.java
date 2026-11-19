@@ -1,0 +1,170 @@
+package ai.timefold.solver.core.impl.heuristic.selector.list;
+
+import static ai.timefold.solver.core.impl.heuristic.selector.move.generic.list.ListChangeMoveSelector.filterPinnedListPlanningVariableValuesWithIndex;
+
+import java.util.Iterator;
+
+import ai.timefold.solver.core.impl.domain.variable.descriptor.ListVariableDescriptor;
+import ai.timefold.solver.core.impl.heuristic.selector.common.iterator.UpcomingSelectionIterator;
+import ai.timefold.solver.core.impl.heuristic.selector.entity.EntitySelector;
+import ai.timefold.solver.core.impl.heuristic.selector.value.IterableValueSelector;
+import ai.timefold.solver.core.impl.phase.scope.AbstractPhaseScope;
+import ai.timefold.solver.core.impl.util.TriangleElementFactory;
+import ai.timefold.solver.core.impl.util.TriangularNumbers;
+
+import org.jspecify.annotations.NonNull;
+
+public final class RandomSubListSelector<Solution_> extends AbstractListMoveSelector<Solution_>
+        implements SubListSelector<Solution_> {
+
+    private final EntitySelector<Solution_> entitySelector;
+    private final IterableValueSelector<Solution_> valueSelector;
+    private final int minimumSubListSize;
+    private final int maximumSubListSize;
+
+    private TriangleElementFactory triangleElementFactory;
+
+    public RandomSubListSelector(
+            EntitySelector<Solution_> entitySelector,
+            IterableValueSelector<Solution_> valueSelector,
+            int minimumSubListSize, int maximumSubListSize) {
+        super((ListVariableDescriptor<Solution_>) valueSelector.getVariableDescriptor());
+        this.entitySelector = entitySelector;
+        this.valueSelector = filterPinnedListPlanningVariableValuesWithIndex(valueSelector, this::getListVariableState);
+        if (minimumSubListSize < 1) {
+            throw new IllegalArgumentException("The minimumSubListSize (%d) must be greater than 0."
+                    .formatted(minimumSubListSize));
+        }
+        if (minimumSubListSize > maximumSubListSize) {
+            throw new IllegalArgumentException(
+                    "The minimumSubListSize (%d) must be less than or equal to the maximumSubListSize (%d)."
+                            .formatted(minimumSubListSize, maximumSubListSize));
+        }
+        this.minimumSubListSize = minimumSubListSize;
+        this.maximumSubListSize = maximumSubListSize;
+
+        phaseLifecycleSupport.addEventListener(this.entitySelector);
+        phaseLifecycleSupport.addEventListener(this.valueSelector);
+    }
+
+    @Override
+    public void phaseStarted(@NonNull AbstractPhaseScope<Solution_> phaseScope) {
+        super.phaseStarted(phaseScope);
+        this.triangleElementFactory = new TriangleElementFactory(minimumSubListSize, maximumSubListSize, workingRandom);
+    }
+
+    @Override
+    public void phaseEnded(@NonNull AbstractPhaseScope<Solution_> phaseScope) {
+        super.phaseEnded(phaseScope);
+        triangleElementFactory = null;
+    }
+
+    @Override
+    public ListVariableDescriptor<Solution_> getVariableDescriptor() {
+        return listVariableDescriptor;
+    }
+
+    @Override
+    public boolean isNeverEnding() {
+        return true;
+    }
+
+    @Override
+    public long getSize() {
+        var subListCount = 0L;
+        for (var entity : ((Iterable<Object>) entitySelector::endingIterator)) {
+            var listSize = listVariableDescriptor.getUnpinnedSubListSize(entity);
+            // Add subLists bigger than minimum subList size.
+            if (listSize >= minimumSubListSize) {
+                subListCount += TriangularNumbers.nthTriangle(listSize - minimumSubListSize + 1);
+                // Subtract moves with subLists bigger than maximum subList size.
+                if (listSize > maximumSubListSize) {
+                    subListCount -= TriangularNumbers.nthTriangle(listSize - maximumSubListSize);
+                }
+            }
+        }
+        return subListCount;
+    }
+
+    @Override
+    public Iterator<Object> endingValueIterator() {
+        // Child value selector is entity independent, so passing null entity is OK.
+        return valueSelector.endingIterator(null);
+    }
+
+    @Override
+    public long getValueCount() {
+        return valueSelector.getSize();
+    }
+
+    @Override
+    public Iterator<SubList> iterator() {
+        var biggestListSize = 0;
+        for (var entity : ((Iterable<Object>) entitySelector::endingIterator)) {
+            biggestListSize = Math.max(biggestListSize, listVariableDescriptor.getUnpinnedSubListSize(entity));
+        }
+        if (biggestListSize < minimumSubListSize) {
+            return new UpcomingSelectionIterator<>() {
+                @Override
+                protected SubList createUpcomingSelection() {
+                    return noUpcomingSelection();
+                }
+            };
+        }
+        return new RandomSubListIterator(valueSelector.iterator());
+    }
+
+    private final class RandomSubListIterator extends UpcomingSelectionIterator<SubList> {
+
+        private final Iterator<Object> valueIterator;
+
+        private RandomSubListIterator(Iterator<Object> valueIterator) {
+            this.valueIterator = valueIterator;
+        }
+
+        @Override
+        protected SubList createUpcomingSelection() {
+            Object sourceEntity = null;
+            var listSize = 0;
+
+            var firstUnpinnedIndex = 0;
+            while (listSize < minimumSubListSize) {
+                if (!valueIterator.hasNext()) {
+                    throw new IllegalStateException("The valueIterator (%s) should never end."
+                            .formatted(valueIterator));
+                }
+                // Using valueSelector instead of entitySelector is fairer
+                // because entities with bigger list variables will be selected more often.
+                var value = valueIterator.next();
+                sourceEntity = listVariableState.getInverseSingleton(value);
+                if (sourceEntity == null) { // Ignore values which are unassigned.
+                    continue;
+                }
+                firstUnpinnedIndex = listVariableDescriptor.getFirstUnpinnedIndex(sourceEntity);
+                listSize = listVariableDescriptor.getListSize(sourceEntity) - firstUnpinnedIndex;
+            }
+
+            var triangleElement = triangleElementFactory.nextElement(listSize);
+            var subListLength = listSize - triangleElement.level() + 1;
+            if (subListLength < 1) {
+                throw new IllegalStateException("Impossible state: The subListLength (%s) must be greater than 0."
+                        .formatted(subListLength));
+            }
+            var sourceIndex = triangleElement.indexOnLevel() - 1 + firstUnpinnedIndex;
+            return new SubList(sourceEntity, sourceIndex, subListLength);
+        }
+    }
+
+    public int getMinimumSubListSize() {
+        return minimumSubListSize;
+    }
+
+    public int getMaximumSubListSize() {
+        return maximumSubListSize;
+    }
+
+    @Override
+    public String toString() {
+        return getClass().getSimpleName() + "(" + valueSelector + ")";
+    }
+}

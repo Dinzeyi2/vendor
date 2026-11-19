@@ -1,0 +1,202 @@
+package ai.timefold.solver.core.impl.solver;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+import static org.assertj.core.api.Assertions.fail;
+import static org.mockito.Mockito.mock;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
+
+import ai.timefold.solver.core.api.solver.Solver;
+import ai.timefold.solver.core.api.solver.SolverRunSummary;
+import ai.timefold.solver.core.api.solver.change.ProblemChange;
+import ai.timefold.solver.core.api.solver.event.NewBestSolutionEvent;
+import ai.timefold.solver.core.api.solver.phase.PhaseType;
+import ai.timefold.solver.core.impl.phase.event.DefaultPhaseEventProducerId;
+import ai.timefold.solver.core.testdomain.TestdataSolution;
+
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+
+class ConsumerSupportTest {
+
+    private static final SolverRunSummary SUMMARY = mock(SolverRunSummary.class);
+
+    private ConsumerSupport<TestdataSolution, Long> consumerSupport;
+
+    @AfterEach
+    void close() {
+        consumerSupport.close();
+    }
+
+    @Test
+    @Timeout(60)
+    void skipAhead() throws InterruptedException {
+        CountDownLatch consumptionStarted = new CountDownLatch(1);
+        CountDownLatch consumptionPaused = new CountDownLatch(1);
+        CountDownLatch consumptionCompleted = new CountDownLatch(1);
+        AtomicReference<Throwable> error = new AtomicReference<>();
+        List<TestdataSolution> consumedSolutions = Collections.synchronizedList(new ArrayList<>());
+        BestSolutionHolder<TestdataSolution> bestSolutionHolder = new BestSolutionHolder<>();
+        consumerSupport = new ConsumerSupport<>(1L, event -> {
+            try {
+                consumptionStarted.countDown();
+                consumptionPaused.await();
+                consumedSolutions.add(event.solution());
+                if (event.solution().getEntityList().size() == 3) { // The last best solution.
+                    consumptionCompleted.countDown();
+                }
+            } catch (InterruptedException e) {
+                error.set(new IllegalStateException("Interrupted waiting.", e));
+            }
+        }, null, null, null, null, bestSolutionHolder);
+
+        consumeIntermediateBestSolution(TestdataSolution.generateSolution(1, 1));
+        consumptionStarted.await();
+        // This solution should be skipped.
+        consumeIntermediateBestSolution(TestdataSolution.generateSolution(2, 2));
+        // This solution should never be skipped.
+        consumeIntermediateBestSolution(TestdataSolution.generateSolution(3, 3));
+
+        consumptionPaused.countDown();
+        consumptionCompleted.await();
+        assertThat(consumedSolutions).hasSize(2);
+        assertThat(consumedSolutions.get(0).getEntityList()).hasSize(1);
+        assertThat(consumedSolutions.get(1).getEntityList()).hasSize(3);
+
+        if (error.get() != null) {
+            fail("Exception during consumption.", error.get());
+        }
+    }
+
+    @Test
+    @Timeout(60)
+    void problemChangesComplete_afterFinalBestSolutionIsConsumed() throws ExecutionException, InterruptedException {
+        BestSolutionHolder<TestdataSolution> bestSolutionHolder = new BestSolutionHolder<>();
+        AtomicReference<TestdataSolution> finalBestSolutionRef = new AtomicReference<>();
+        consumerSupport = new ConsumerSupport<>(1L, null,
+                event -> finalBestSolutionRef.set(event.solution()), null, null, null, bestSolutionHolder);
+
+        CompletableFuture<Void> futureProblemChange = addProblemChange(bestSolutionHolder);
+
+        consumeIntermediateBestSolution(TestdataSolution.generateSolution());
+        assertThat(futureProblemChange).isNotCompleted();
+        TestdataSolution finalBestSolution = TestdataSolution.generateSolution();
+        consumerSupport.consumeFinalBestSolution(new DefaultSolverRunResult<>(finalBestSolution, SUMMARY));
+        futureProblemChange.get();
+        assertThat(finalBestSolutionRef.get()).isSameAs(finalBestSolution);
+        assertThat(futureProblemChange).isCompleted();
+    }
+
+    @Test
+    @Timeout(60)
+    void problemChangesCompleteExceptionally_afterExceptionInConsumer() {
+        BestSolutionHolder<TestdataSolution> bestSolutionHolder = new BestSolutionHolder<>();
+        final String errorMessage = "Test exception";
+        Consumer<NewBestSolutionEvent<TestdataSolution>> errorneousConsumer = bestSolution -> {
+            throw new RuntimeException(errorMessage);
+        };
+        consumerSupport = new ConsumerSupport<>(1L, errorneousConsumer, null, null, null, (id, ex) -> {
+        }, bestSolutionHolder);
+
+        CompletableFuture<Void> futureProblemChange = addProblemChange(bestSolutionHolder);
+        consumeIntermediateBestSolution(TestdataSolution.generateSolution());
+
+        assertThatExceptionOfType(ExecutionException.class).isThrownBy(futureProblemChange::get)
+                .havingRootCause()
+                .isInstanceOf(RuntimeException.class)
+                .withMessage(errorMessage);
+        assertThat(futureProblemChange).isCompletedExceptionally();
+    }
+
+    @Test
+    @Timeout(60)
+    void pendingProblemChangesAreCanceled_afterFinalBestSolutionIsConsumed() throws ExecutionException, InterruptedException {
+        BestSolutionHolder<TestdataSolution> bestSolutionHolder = new BestSolutionHolder<>();
+        consumerSupport = new ConsumerSupport<>(1L, null, null,
+                null, null, null, bestSolutionHolder);
+
+        CompletableFuture<Void> futureProblemChange = addProblemChange(bestSolutionHolder);
+
+        consumeIntermediateBestSolution(TestdataSolution.generateSolution());
+        assertThat(futureProblemChange).isNotCompleted();
+
+        CompletableFuture<Void> pendingProblemChange = addProblemChange(bestSolutionHolder);
+        consumerSupport.consumeFinalBestSolution(new DefaultSolverRunResult<>(TestdataSolution.generateSolution(), SUMMARY));
+        futureProblemChange.get();
+        assertThat(futureProblemChange).isCompleted();
+
+        assertThatExceptionOfType(CancellationException.class).isThrownBy(pendingProblemChange::get);
+    }
+
+    @Test
+    @Timeout(60)
+    void solutionNotSupplied_withoutStartAndFirstInitializedConsumers() {
+        consumerSupport = new ConsumerSupport<>(1L, null, null, null, null, null, new BestSolutionHolder<>());
+        var consumerCalled = new AtomicBoolean(false);
+        consumerSupport.consumeStartSolverJob(() -> {
+            consumerCalled.set(true);
+            return TestdataSolution.generateSolution();
+        });
+        assertThat(consumerCalled).isFalse();
+        consumerSupport.consumeFirstInitializedSolution(() -> {
+            consumerCalled.set(true);
+            return TestdataSolution.generateSolution();
+        }, DefaultPhaseEventProducerId.of(PhaseType.CONSTRUCTION_HEURISTIC, 0), false);
+        assertThat(consumerCalled).isFalse();
+        // Must not block, as no lock was acquired by the calls above.
+        consumerSupport.consumeFinalBestSolution(new DefaultSolverRunResult<>(TestdataSolution.generateSolution(), SUMMARY));
+    }
+
+    @Test
+    @Timeout(60)
+    void solutionSuppliedOnCallerThread_withStartAndFirstInitializedConsumers() throws InterruptedException {
+        var consumed = new CountDownLatch(2);
+        var startedSolutionRef = new AtomicReference<TestdataSolution>();
+        var firstInitializedSolutionRef = new AtomicReference<TestdataSolution>();
+        consumerSupport = new ConsumerSupport<>(1L, null, null,
+                event -> {
+                    firstInitializedSolutionRef.set(event.solution());
+                    consumed.countDown();
+                },
+                event -> {
+                    startedSolutionRef.set(event.solution());
+                    consumed.countDown();
+                }, null, new BestSolutionHolder<>());
+
+        var callerThread = Thread.currentThread();
+        var startedSolution = TestdataSolution.generateSolution();
+        consumerSupport.consumeStartSolverJob(() -> {
+            assertThat(Thread.currentThread()).isSameAs(callerThread);
+            return startedSolution;
+        });
+        var firstInitializedSolution = TestdataSolution.generateSolution();
+        consumerSupport.consumeFirstInitializedSolution(() -> {
+            assertThat(Thread.currentThread()).isSameAs(callerThread);
+            return firstInitializedSolution;
+        }, DefaultPhaseEventProducerId.of(PhaseType.CONSTRUCTION_HEURISTIC, 0), false);
+
+        consumed.await();
+        assertThat(startedSolutionRef.get()).isSameAs(startedSolution);
+        assertThat(firstInitializedSolutionRef.get()).isSameAs(firstInitializedSolution);
+    }
+
+    private CompletableFuture<Void> addProblemChange(BestSolutionHolder<TestdataSolution> bestSolutionHolder) {
+        return bestSolutionHolder.addProblemChange(mock(Solver.class), List.of(mock(ProblemChange.class)));
+    }
+
+    private void consumeIntermediateBestSolution(TestdataSolution bestSolution) {
+        consumerSupport.consumeIntermediateBestSolution(bestSolution,
+                DefaultPhaseEventProducerId.of(PhaseType.CONSTRUCTION_HEURISTIC, 0), () -> true);
+    }
+}

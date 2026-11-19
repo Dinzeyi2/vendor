@@ -1,0 +1,142 @@
+use rapier_testbed3d::TestbedViewer;
+use rapier3d::prelude::*;
+
+pub async fn run(viewer: &mut TestbedViewer) -> anyhow::Result<()> {
+    /*
+     * World
+     */
+    let mut world = PhysicsWorld::new();
+
+    /*
+     * Ground.
+     */
+    let ground_size = 20.0;
+    let ground_height = 0.1;
+
+    let rigid_body = RigidBodyBuilder::fixed().translation(Vector::new(0.0, -ground_height, 0.0));
+    let collider = ColliderBuilder::cuboid(ground_size, ground_height, ground_size)
+        .friction(0.15)
+        // .restitution(0.5)
+        ;
+    let (_ground_handle, _) = world.insert(rigid_body, collider);
+
+    /*
+     * Rolling ball
+     */
+    let ball_rad = 0.1;
+    let rb = RigidBodyBuilder::dynamic()
+        .translation(Vector::new(0.0, 0.2, 0.0))
+        .linvel(Vector::new(10.0, 0.0, 0.0));
+    let collider = ColliderBuilder::ball(ball_rad).density(100.0);
+    let (ball_handle, ball_coll_handle) = world.insert(rb, collider);
+
+    /*
+     * Colliders without bodies
+     */
+    let shape_size = 3.0;
+    let static_collider =
+        ColliderBuilder::ball(shape_size).translation(Vector::new(-15.0, shape_size, 18.0));
+    world.insert_collider(static_collider, None);
+
+    let shapes = [
+        SharedShape::ball(shape_size),
+        SharedShape::cuboid(shape_size, shape_size, shape_size),
+        SharedShape::cone(shape_size, shape_size),
+        SharedShape::cylinder(shape_size, shape_size),
+    ];
+    let mut shape_idx = 0;
+    let shapeshifting_collider = ColliderBuilder::new(shapes[shape_idx].clone())
+        .translation(Vector::new(-15.0, shape_size, 9.0));
+    let shapeshifting_coll_handle = world.insert_collider(shapeshifting_collider, None);
+
+    let mut linvel = Vector::ZERO;
+    let mut angvel = AngVector::ZERO;
+    let mut pos = Pose::IDENTITY;
+    let mut step = 0;
+    let snapped_frame = 51;
+
+    /*
+     * Create the primitives
+     */
+    let num = 8;
+    let rad = 1.0;
+
+    let shiftx = rad * 2.0 + rad;
+    let shifty = rad * 2.0 + rad;
+    let shiftz = rad * 2.0 + rad;
+    let centerx = shiftx * (num / 2) as f32;
+    let centery = shifty / 2.0;
+    let centerz = shiftz * (num / 2) as f32;
+
+    let mut offset = -(num as f32) * (rad * 2.0 + rad) * 0.5;
+
+    for j in 0usize..20 {
+        for i in 0..num {
+            for k in 0usize..num {
+                let x = i as f32 * shiftx - centerx + offset + 5.0;
+                let y = j as f32 * shifty + centery + 3.0;
+                let z = k as f32 * shiftz - centerz + offset;
+
+                // Build the rigid body.
+                let rigid_body = RigidBodyBuilder::dynamic().translation(Vector::new(x, y, z));
+
+                let collider = match j % 5 {
+                    0 => ColliderBuilder::cuboid(rad, rad, rad),
+                    1 => ColliderBuilder::ball(rad),
+                    // Rounded cylinders are much more efficient that cylinder, even if the
+                    // rounding margin is small.
+                    2 => ColliderBuilder::round_cylinder(rad, rad, rad / 10.0),
+                    3 => ColliderBuilder::cone(rad, rad),
+                    _ => ColliderBuilder::capsule_y(rad, rad),
+                };
+
+                let (_handle, _) = world.insert(rigid_body, collider);
+            }
+        }
+
+        offset -= 0.05 * rad * (num as f32 - 1.0);
+    }
+
+    /*
+     * Set up the testbed.
+     */
+    viewer.set_world(&mut world);
+    viewer.look_at(Vec3::new(40.0, 40.0, 40.0), Vec3::ZERO);
+
+    while viewer.render_frame(&mut world).await {
+        if viewer.simulating() {
+            world.step();
+
+            step += 1;
+
+            // Snap the ball velocity or restore it.
+            let ball = world.bodies.get_mut(ball_handle).unwrap();
+
+            if step == snapped_frame {
+                linvel = ball.linvel();
+                angvel = ball.angvel();
+                pos = *ball.position();
+            }
+
+            let shapeshifting_coll = world.colliders.get_mut(shapeshifting_coll_handle).unwrap();
+            if step % 50 == 0 {
+                shape_idx = (shape_idx + 1) % 4;
+                shapeshifting_coll.set_shape(shapes[shape_idx].clone())
+            }
+
+            if step == 100 {
+                ball.set_linvel(linvel, true);
+                ball.set_angvel(angvel, true);
+                ball.set_position(pos, true);
+                step = snapped_frame;
+            }
+
+            let ball_coll = world.colliders.get_mut(ball_coll_handle).unwrap();
+            ball_coll.set_shape(SharedShape::ball(ball_rad * step as f32 * 2.0));
+
+            viewer.update_collider(ball_coll_handle, &world);
+            viewer.update_collider(shapeshifting_coll_handle, &world);
+        }
+    }
+    Ok(())
+}

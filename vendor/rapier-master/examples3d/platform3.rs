@@ -1,0 +1,102 @@
+use rapier_testbed3d::TestbedViewer;
+use rapier3d::prelude::*;
+
+pub async fn run(viewer: &mut TestbedViewer) -> anyhow::Result<()> {
+    /*
+     * World
+     */
+    let mut world = PhysicsWorld::new();
+
+    /*
+     * Ground.
+     */
+    let ground_size = 10.0;
+    let ground_height = 0.1;
+
+    let rigid_body = RigidBodyBuilder::fixed().translation(Vector::new(0.0, -ground_height, 0.0));
+    let collider = ColliderBuilder::cuboid(ground_size, ground_height, ground_size);
+    world.insert(rigid_body, collider);
+
+    /*
+     * Create the boxes
+     */
+    let num = 6;
+    let rad = 0.2;
+
+    let shift = rad * 2.0;
+    let centerx = shift * num as f32 / 2.0;
+    let centerz = shift * num as f32 / 2.0;
+
+    for i in 0usize..num {
+        for j in 0usize..num {
+            for k in 0usize..num {
+                let centery = if j >= num / 2 { 5.0 } else { 3.0 };
+                let x = i as f32 * shift - centerx;
+                let y = j as f32 * shift + centery;
+                let z = k as f32 * shift - centerz;
+
+                // Build the rigid body.
+                let rigid_body = RigidBodyBuilder::dynamic().translation(Vector::new(x, y, z));
+                let collider = ColliderBuilder::cuboid(rad, rad, rad);
+                world.insert(rigid_body, collider);
+            }
+        }
+    }
+
+    /*
+     * Setup a velocity-based kinematic rigid body.
+     */
+    let platform_body =
+        RigidBodyBuilder::kinematic_velocity_based().translation(Vector::new(0.0, 1.5 + 0.8, 0.0));
+    let collider = ColliderBuilder::cuboid(rad * 10.0, rad, rad * 10.0);
+    let (velocity_based_platform_handle, _) = world.insert(platform_body, collider);
+
+    /*
+     * Setup a position-based kinematic rigid body.
+     */
+    let platform_body = RigidBodyBuilder::kinematic_position_based().translation(Vector::new(
+        0.0,
+        3.0 + 1.5 + 0.8,
+        0.0,
+    ));
+    let collider = ColliderBuilder::cuboid(rad * 10.0, rad, rad * 10.0);
+    let (position_based_platform_handle, _) = world.insert(platform_body, collider);
+
+    /*
+     * Run the simulation.
+     */
+    viewer.set_world(&mut world);
+    viewer.look_at(Vec3::new(10.0, 5.0, 10.0), Vec3::ZERO);
+
+    let mut step_id = 0usize;
+    while viewer.render_frame(&mut world).await {
+        if viewer.simulating() {
+            world.step();
+            step_id += 1;
+
+            let velocity = Vector::new(
+                0.0,
+                ((step_id as f32 * world.integration_parameters.dt) * 2.0).cos(),
+                (step_id as f32 * world.integration_parameters.dt).sin() * 2.0,
+            );
+
+            // Update the velocity-based kinematic body by setting its velocity.
+            if let Some(platform) = world.bodies.get_mut(velocity_based_platform_handle) {
+                platform.set_linvel(velocity, true);
+                platform.set_angvel(Vector::new(0.0, 1.0, 0.0), true);
+            }
+
+            // Update the position-based kinematic body by setting its next position.
+            if let Some(platform) = world.bodies.get_mut(position_based_platform_handle) {
+                let next_tra =
+                    platform.translation() + (-velocity * world.integration_parameters.dt);
+                let next_rot = platform.rotation();
+                let delta_rot = Rotation::from_rotation_y(-0.5 * world.integration_parameters.dt);
+                let next_rot = delta_rot * next_rot;
+                platform.set_next_kinematic_translation(next_tra);
+                platform.set_next_kinematic_rotation(next_rot);
+            }
+        }
+    }
+    Ok(())
+}

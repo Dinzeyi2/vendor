@@ -1,0 +1,41 @@
+package ai.timefold.solver.core.impl.bavet.uni;
+
+import java.util.function.Function;
+import java.util.function.IntSupplier;
+
+import ai.timefold.solver.core.config.solver.EnvironmentMode;
+import ai.timefold.solver.core.impl.bavet.common.tuple.BiTuple;
+import ai.timefold.solver.core.impl.bavet.common.tuple.TupleLifecycle;
+import ai.timefold.solver.core.impl.bavet.common.tuple.UniTuple;
+import ai.timefold.solver.core.impl.util.Pair;
+
+public final class Group2Mapping0CollectorUniNode<OldA, A, B>
+        extends AbstractGroupUniNode<OldA, BiTuple<A, B>, Pair<A, B>, Void, Void> {
+
+    private final int outputStoreSize;
+
+    public Group2Mapping0CollectorUniNode(Function<OldA, A> groupKeyMappingA, Function<OldA, B> groupKeyMappingB,
+            IntSupplier storeIndexReserver,
+            TupleLifecycle<BiTuple<A, B>> nextNodesTupleLifecycle, int outputStoreSize, EnvironmentMode environmentMode) {
+        super(storeIndexReserver,
+                tuple -> createGroupKey(groupKeyMappingA, groupKeyMappingB, tuple), nextNodesTupleLifecycle, environmentMode);
+        this.outputStoreSize = outputStoreSize;
+    }
+
+    static <A, B, OldA> Pair<A, B> createGroupKey(Function<OldA, A> groupKeyMappingA, Function<OldA, B> groupKeyMappingB,
+            UniTuple<OldA> tuple) {
+        var oldA = tuple.getA();
+        return new Pair<>(groupKeyMappingA.apply(oldA), groupKeyMappingB.apply(oldA));
+    }
+
+    @Override
+    protected BiTuple<A, B> createOutTuple(Pair<A, B> groupKey) {
+        return BiTuple.of(groupKey.key(), groupKey.value(), outputStoreSize);
+    }
+
+    @Override
+    protected void updateOutTupleToResult(BiTuple<A, B> outTuple, Void unused) {
+        throw new IllegalStateException("Impossible state: collector is null.");
+    }
+
+}

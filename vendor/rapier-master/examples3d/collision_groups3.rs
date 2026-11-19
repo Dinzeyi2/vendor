@@ -1,0 +1,95 @@
+use kiss3d::color::{BLUE, GREEN};
+use rapier_testbed3d::TestbedViewer;
+use rapier3d::prelude::*;
+
+pub async fn run(viewer: &mut TestbedViewer) -> anyhow::Result<()> {
+    /*
+     * World
+     */
+    let mut world = PhysicsWorld::new();
+
+    /*
+     * Ground
+     */
+    let ground_size = 5.0;
+    let ground_height = 0.1;
+
+    let rigid_body = RigidBodyBuilder::fixed().translation(Vector::new(0.0, -ground_height, 0.0));
+    let collider = ColliderBuilder::cuboid(ground_size, ground_height, ground_size);
+    let (floor_handle, _) = world.insert(rigid_body, collider);
+
+    /*
+     * Setup groups
+     */
+    const GREEN_GROUP: InteractionGroups =
+        InteractionGroups::new(Group::GROUP_1, Group::GROUP_1, InteractionTestMode::And);
+    const BLUE_GROUP: InteractionGroups =
+        InteractionGroups::new(Group::GROUP_2, Group::GROUP_2, InteractionTestMode::And);
+
+    /*
+     * A green floor that will collide with the GREEN group only.
+     */
+    let green_floor = ColliderBuilder::cuboid(1.0, 0.1, 1.0)
+        .translation(Vector::new(0.0, 1.0, 0.0))
+        .collision_groups(GREEN_GROUP);
+    let green_collider_handle = world.insert_collider(green_floor, Some(floor_handle));
+
+    viewer.set_initial_collider_color(green_collider_handle, BLUE);
+
+    /*
+     * A blue floor that will collide with the BLUE group only.
+     */
+    let blue_floor = ColliderBuilder::cuboid(1.0, 0.1, 1.0)
+        .translation(Vector::new(0.0, 2.0, 0.0))
+        .collision_groups(BLUE_GROUP);
+    let blue_collider_handle = world.insert_collider(blue_floor, Some(floor_handle));
+
+    viewer.set_initial_collider_color(blue_collider_handle, GREEN);
+
+    /*
+     * Create the cubes
+     */
+    let num = 8;
+    let rad = 0.1;
+
+    let shift = rad * 2.0;
+    let centerx = shift * (num / 2) as f32;
+    let centery = 2.5;
+    let centerz = shift * (num / 2) as f32;
+
+    for j in 0usize..4 {
+        for i in 0..num {
+            for k in 0usize..num {
+                let x = i as f32 * shift - centerx;
+                let y = j as f32 * shift + centery;
+                let z = k as f32 * shift - centerz;
+
+                // Alternate between the green and blue groups.
+                let (group, color) = if k % 2 == 0 {
+                    (GREEN_GROUP, GREEN)
+                } else {
+                    (BLUE_GROUP, BLUE)
+                };
+
+                let rigid_body = RigidBodyBuilder::dynamic().translation(Vector::new(x, y, z));
+                let collider = ColliderBuilder::cuboid(rad, rad, rad).collision_groups(group);
+                let (handle, _) = world.insert(rigid_body, collider);
+
+                viewer.set_initial_body_color(handle, color);
+            }
+        }
+    }
+
+    /*
+     * Set up the testbed.
+     */
+    viewer.set_world(&mut world);
+    viewer.look_at(Vec3::new(10.0, 10.0, 10.0), Vec3::ZERO);
+
+    while viewer.render_frame(&mut world).await {
+        if viewer.simulating() {
+            world.step();
+        }
+    }
+    Ok(())
+}

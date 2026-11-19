@@ -1,0 +1,35 @@
+[package]
+name = "rapier-examples-3d-f64"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+default-run = "all_examples3-f64"
+publish = false
+
+[features]
+parallel = ["rapier3d-f64/parallel", "rapier_testbed3d-f64/parallel"]
+enhanced-determinism = ["rapier3d-f64/enhanced-determinism"]
+
+[dependencies]
+anyhow.workspace = true
+rand.workspace = true
+getrandom.workspace = true
+wasm-bindgen.workspace = true
+obj-rs.workspace = true
+bincode.workspace = true
+serde = { workspace = true, features = ["std"] }
+kiss3d.workspace = true
+
+[dependencies.rapier_testbed3d-f64]
+workspace = true
+
+[dependencies.rapier3d-f64]
+workspace = true
+
+[[bin]]
+name = "all_examples3-f64"
+path = "./all_examples3-f64.rs"
+
+#[lib]
+#crate-type = ["cdylib", "rlib"]
+#path = "./all_examples3_wasm.rs"

@@ -1,0 +1,70 @@
+package ai.timefold.solver.core.testdomain.clone.customcloner;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import ai.timefold.solver.core.api.domain.solution.PlanningEntityProperty;
+import ai.timefold.solver.core.api.domain.solution.PlanningScore;
+import ai.timefold.solver.core.api.domain.solution.PlanningSolution;
+import ai.timefold.solver.core.api.domain.solution.ProblemFactCollectionProperty;
+import ai.timefold.solver.core.api.domain.solution.cloner.SolutionCloner;
+import ai.timefold.solver.core.api.domain.valuerange.ValueRangeProvider;
+import ai.timefold.solver.core.api.score.SimpleScore;
+import ai.timefold.solver.core.testdomain.TestdataEntity;
+import ai.timefold.solver.core.testdomain.TestdataValue;
+
+import org.jspecify.annotations.NonNull;
+
+@PlanningSolution(solutionCloner = TestdataCorrectlyClonedSolution.class)
+public class TestdataCorrectlyClonedSolution implements SolutionCloner<TestdataCorrectlyClonedSolution> {
+
+    private boolean clonedByCustomCloner = false;
+    @PlanningScore
+    private SimpleScore score;
+    @PlanningEntityProperty
+    private TestdataEntity entity = new TestdataEntity("A");
+
+    private static final List<TestdataValue> staticList = List.of(new TestdataValue("1"), new TestdataValue("2"));
+
+    @ValueRangeProvider(id = "valueRange")
+    @ProblemFactCollectionProperty
+    public List<TestdataValue> valueRange() {
+        // two values needed to allow for at least one doable move, otherwise the second step ends in an infinite loop
+        return new ArrayList<>(staticList);
+    }
+
+    @Override
+    public @NonNull TestdataCorrectlyClonedSolution cloneSolution(@NonNull TestdataCorrectlyClonedSolution original) {
+        TestdataCorrectlyClonedSolution clone = new TestdataCorrectlyClonedSolution();
+        clone.clonedByCustomCloner = true;
+        // score is immutable so no need to create a new instance
+        clone.score = original.score;
+        clone.entity.setValue(original.entity.getValue());
+        return clone;
+    }
+
+    public boolean isClonedByCustomCloner() {
+        return clonedByCustomCloner;
+    }
+
+    public void setClonedByCustomCloner(boolean clonedByCustomCloner) {
+        this.clonedByCustomCloner = clonedByCustomCloner;
+    }
+
+    public SimpleScore getScore() {
+        return score;
+    }
+
+    public void setScore(SimpleScore score) {
+        this.score = score;
+    }
+
+    public TestdataEntity getEntity() {
+        return entity;
+    }
+
+    public void setEntity(TestdataEntity entity) {
+        this.entity = entity;
+    }
+
+}

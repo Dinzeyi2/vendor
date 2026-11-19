@@ -1,0 +1,31 @@
+package ai.timefold.solver.core.impl.localsearch.decider.acceptor.tabu;
+
+import java.util.Collection;
+
+import ai.timefold.solver.core.impl.localsearch.scope.LocalSearchMoveScope;
+import ai.timefold.solver.core.impl.localsearch.scope.LocalSearchStepScope;
+
+import org.jspecify.annotations.NullMarked;
+
+@NullMarked
+public final class EntityTabuAcceptor<Solution_> extends AbstractTabuAcceptor<Solution_> {
+
+    public EntityTabuAcceptor(String logIndentation) {
+        super(logIndentation);
+    }
+
+    // ************************************************************************
+    // Worker methods
+    // ************************************************************************
+
+    @Override
+    protected Collection<Object> findTabu(LocalSearchMoveScope<Solution_> moveScope) {
+        return moveScope.getMove().getPlanningEntities();
+    }
+
+    @Override
+    protected Collection<Object> findNewTabu(LocalSearchStepScope<Solution_> stepScope) {
+        return stepScope.getStep().getPlanningEntities();
+    }
+
+}

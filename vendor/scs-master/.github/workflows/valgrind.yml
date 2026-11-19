@@ -1,0 +1,32 @@
+---
+name: Valgrind
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 1'
+
+jobs:
+  linux:
+    # On ubuntu-latest (Ubuntu 26.04) run_tests_indirect hangs under valgrind;
+    # the whole job takes ~20 minutes on 24.04.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update
+      - run: sudo apt-get install libopenblas-dev liblapack-dev valgrind
+      - run: make OPT="-O3 -g"
+      - run: make test OPT="-O3 -g"
+      - run: valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes --show-reachable=yes --error-exitcode=1 out/run_tests_direct
+      - run: valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes --show-reachable=yes --error-exitcode=1 out/run_tests_indirect
+      - run: valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes --show-reachable=yes --error-exitcode=1 out/run_tests_dense
+
+  mac-leaks:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: make accelerate OPT="-O3 -g"
+      - run: leaks --atExit -- out/run_tests_accelerate

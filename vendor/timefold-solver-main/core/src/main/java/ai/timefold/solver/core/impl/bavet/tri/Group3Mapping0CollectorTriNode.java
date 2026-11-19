@@ -1,0 +1,46 @@
+package ai.timefold.solver.core.impl.bavet.tri;
+
+import java.util.function.IntSupplier;
+
+import ai.timefold.solver.core.api.function.TriFunction;
+import ai.timefold.solver.core.config.solver.EnvironmentMode;
+import ai.timefold.solver.core.impl.bavet.common.tuple.TriTuple;
+import ai.timefold.solver.core.impl.bavet.common.tuple.TupleLifecycle;
+import ai.timefold.solver.core.impl.util.Triple;
+
+public final class Group3Mapping0CollectorTriNode<OldA, OldB, OldC, A, B, C>
+        extends AbstractGroupTriNode<OldA, OldB, OldC, TriTuple<A, B, C>, Triple<A, B, C>, Void, Void> {
+
+    private final int outputStoreSize;
+
+    public Group3Mapping0CollectorTriNode(TriFunction<OldA, OldB, OldC, A> groupKeyMappingA,
+            TriFunction<OldA, OldB, OldC, B> groupKeyMappingB, TriFunction<OldA, OldB, OldC, C> groupKeyMappingC,
+            IntSupplier storeIndexReserver,
+            TupleLifecycle<TriTuple<A, B, C>> nextNodesTupleLifecycle, int outputStoreSize, EnvironmentMode environmentMode) {
+        super(storeIndexReserver,
+                tuple -> createGroupKey(groupKeyMappingA, groupKeyMappingB, groupKeyMappingC, tuple),
+                nextNodesTupleLifecycle, environmentMode);
+        this.outputStoreSize = outputStoreSize;
+    }
+
+    static <A, B, C, OldA, OldB, OldC> Triple<A, B, C> createGroupKey(TriFunction<OldA, OldB, OldC, A> groupKeyMappingA,
+            TriFunction<OldA, OldB, OldC, B> groupKeyMappingB, TriFunction<OldA, OldB, OldC, C> groupKeyMappingC,
+            TriTuple<OldA, OldB, OldC> tuple) {
+        var oldA = tuple.getA();
+        var oldB = tuple.getB();
+        var oldC = tuple.getC();
+        return new Triple<>(groupKeyMappingA.apply(oldA, oldB, oldC), groupKeyMappingB.apply(oldA, oldB, oldC),
+                groupKeyMappingC.apply(oldA, oldB, oldC));
+    }
+
+    @Override
+    protected TriTuple<A, B, C> createOutTuple(Triple<A, B, C> groupKey) {
+        return TriTuple.of(groupKey.a(), groupKey.b(), groupKey.c(), outputStoreSize);
+    }
+
+    @Override
+    protected void updateOutTupleToResult(TriTuple<A, B, C> outTuple, Void unused) {
+        throw new IllegalStateException("Impossible state: collector is null.");
+    }
+
+}

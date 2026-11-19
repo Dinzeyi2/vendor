@@ -1,0 +1,427 @@
+package ai.timefold.solver.core.impl.score.director;
+
+import java.util.Map;
+import java.util.function.Consumer;
+
+import ai.timefold.solver.core.api.domain.solution.PlanningSolution;
+import ai.timefold.solver.core.api.domain.variable.PlanningListVariable;
+import ai.timefold.solver.core.api.domain.variable.PlanningVariable;
+import ai.timefold.solver.core.api.domain.variable.ShadowVariablesInconsistent;
+import ai.timefold.solver.core.api.score.Score;
+import ai.timefold.solver.core.api.score.stream.Constraint;
+import ai.timefold.solver.core.api.score.stream.ConstraintRef;
+import ai.timefold.solver.core.api.solver.SolutionManager;
+import ai.timefold.solver.core.config.solver.EnvironmentMode;
+import ai.timefold.solver.core.impl.domain.entity.descriptor.EntityDescriptor;
+import ai.timefold.solver.core.impl.domain.solution.descriptor.SolutionDescriptor;
+import ai.timefold.solver.core.impl.domain.variable.BasicVariableState;
+import ai.timefold.solver.core.impl.domain.variable.ListVariableState;
+import ai.timefold.solver.core.impl.domain.variable.descriptor.ListVariableDescriptor;
+import ai.timefold.solver.core.impl.domain.variable.descriptor.VariableDescriptor;
+import ai.timefold.solver.core.impl.domain.variable.supply.SupplyManager;
+import ai.timefold.solver.core.impl.move.MoveDirector;
+import ai.timefold.solver.core.impl.neighborhood.MoveRepository;
+import ai.timefold.solver.core.impl.neighborhood.NeighborhoodsBasedMoveRepository;
+import ai.timefold.solver.core.impl.phase.scope.SolverLifecyclePoint;
+import ai.timefold.solver.core.impl.score.constraint.ConstraintMatchPolicy;
+import ai.timefold.solver.core.impl.score.constraint.ConstraintMatchTotal;
+import ai.timefold.solver.core.impl.score.definition.ScoreDefinition;
+import ai.timefold.solver.core.impl.solver.thread.ChildThreadType;
+import ai.timefold.solver.core.preview.api.move.Move;
+import ai.timefold.solver.core.preview.api.move.SolutionView;
+
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
+
+/**
+ * @param <Solution_> the solution type, the class with the {@link PlanningSolution} annotation
+ * @param <Score_> the score type to go with the solution
+ */
+@NullMarked
+public interface InnerScoreDirector<Solution_, Score_ extends Score<Score_>>
+        extends VariableDescriptorAwareScoreDirector<Solution_>, AutoCloseable {
+
+    /**
+     * Sets the {@link PlanningSolution working solution} of the {@link ScoreDirector}
+     * to the given {@link PlanningSolution solution}, and force updates all the shadow variables on the given solution.
+     *
+     * @param workingSolution never null, must never be the same instance as the best solution.
+     */
+    void setWorkingSolution(Solution_ workingSolution);
+
+    /**
+     * Sets the {@link PlanningSolution working solution} of the {@link ScoreDirector}
+     * to the given {@link PlanningSolution solution}, without updating any of the shadow variables on the given solution.
+     *
+     * @param workingSolution never null, must never be the same instance as the best solution.
+     */
+    void setWorkingSolutionWithoutUpdatingShadows(Solution_ workingSolution);
+
+    /**
+     * Different phases may need different move repositories,
+     * as they may be based on different sets of moves.
+     * Therefore move repository cannot be injected at score director construction time.
+     * <p>
+     * A phase may not need a move repository at all,
+     * such as construction heuristics, which currently does not support Neighborhoods API.
+     * <p>
+     * Each phase is responsible for calling this method to set its repository,
+     * and also calling it again at the end to null it out.
+     */
+    void setMoveRepository(@Nullable MoveRepository<Solution_> moveRepository);
+
+    /**
+     * A notifier that can be used to notify a {@link NeighborhoodsBasedMoveRepository} of changes
+     * to the internal state that do not affect any variables (genuine or shadow).
+     *
+     * @return never null
+     */
+    NeighborhoodNotifier<Solution_> getNeighborhoodNotifier();
+
+    /**
+     * Calculates the {@link Score} and updates the {@link PlanningSolution working solution} accordingly.
+     *
+     * @return never null, the {@link Score} of the {@link PlanningSolution working solution}
+     */
+    InnerScore<Score_> calculateScore();
+
+    /**
+     * @return {@link ConstraintMatchPolicy#ENABLED} if {@link #getConstraintMatchTotalMap()} can be called.
+     *         {@link ConstraintMatchPolicy#ENABLED_WITHOUT_JUSTIFICATIONS} if only the former can be called.
+     *         {@link ConstraintMatchPolicy#DISABLED} if neither can be called.
+     */
+    ConstraintMatchPolicy getConstraintMatchPolicy();
+
+    /**
+     * Explains the {@link Score} of {@link #calculateScore()} by splitting it up per {@link Constraint}.
+     * <p>
+     * The sum of {@link ConstraintMatchTotal#getScore()} equals {@link #calculateScore()}.
+     * <p>
+     * Call {@link #calculateScore()} before calling this method,
+     * unless that method has already been called since the last {@link PlanningVariable} changes.
+     *
+     * @return never null, the key is the constraint reference.
+     *         If a constraint is present in the problem but resulted in no matches,
+     *         it will still be in the map with a {@link ConstraintMatchTotal#getConstraintMatchSet()} size of 0.
+     * @throws IllegalStateException if {@link #getConstraintMatchPolicy()} returns {@link ConstraintMatchPolicy#DISABLED}.
+     */
+    Map<ConstraintRef, ConstraintMatchTotal<Score_>> getConstraintMatchTotalMap();
+
+    /**
+     * @return used to check {@link #isWorkingEntityListDirty(long)} later on
+     */
+    long getWorkingEntityListRevision();
+
+    int getWorkingGenuineEntityCount();
+
+    int getWorkingInitScore();
+
+    void executeMove(Move<Solution_> move);
+
+    /**
+     * Executes a move, finds out its score, and immediately undoes it.
+     * The undo action also restores the working solution score to its original value.
+     * If appropriate, consider setting {@link #setAllChangesWillBeUndoneBeforeStepEnds(boolean)} to true beforehand,
+     * and resetting it to false afterward.
+     * There are performance gains to be made
+     * if your use case does not require step-level mechanisms to be aware of the changes.
+     *
+     * @param move never null
+     * @param consumer callback to run after move execution but before undo
+     * @param assertMoveScoreFromScratch true will hurt performance
+     * @return never null
+     */
+    InnerScore<Score_> executeTemporaryMove(Move<Solution_> move, @Nullable Consumer<SolutionView<Solution_>> consumer,
+            boolean assertMoveScoreFromScratch);
+
+    /**
+     * As defined by {@link #executeTemporaryMove(Move, Consumer, boolean)}, but with no consumer.
+     */
+    default InnerScore<Score_> executeTemporaryMove(Move<Solution_> move, boolean assertMoveScoreFromScratch) {
+        return executeTemporaryMove(move, null, assertMoveScoreFromScratch);
+    }
+
+    /**
+     * @param expectedWorkingEntityListRevision an
+     * @return true if the entityList might have a different set of instances now
+     */
+    boolean isWorkingEntityListDirty(long expectedWorkingEntityListRevision);
+
+    /**
+     * Some score directors keep a set of changes
+     * that they only apply when {@link #calculateScore()} is called.
+     * Until that happens, this set accumulates and could possibly act as a memory leak.
+     *
+     * @return true if the score director can potentially cause a memory leak due to unflushed changes.
+     */
+    boolean requiresFlushing();
+
+    /**
+     * Inverse shadow variables have a fail-fast for cases
+     * where the shadow variable doesn't actually point to its correct inverse.
+     * This is very useful to pinpoint improperly initialized solutions.
+     * <p>
+     * However, {@link SolutionManager#update(Object)} exists precisely for the purpose of initializing solutions.
+     * And when this API is used, the fail-fast must not be triggered as it is guaranteed and expected
+     * that the inverse relationships will be wrong.
+     * In fact, they will be null.
+     * <p>
+     * For this case and this case only, this method is allowed to return false.
+     * All other cases must return true, otherwise a very valuable fail-fast is lost.
+     *
+     * @return false if the fail-fast on shadow variables should not be triggered
+     */
+    boolean expectShadowVariablesInCorrectState();
+
+    boolean ignoreInconsistentSolutions();
+
+    void unassignInconsistentEntities();
+
+    /**
+     * @return never null
+     */
+    ScoreDirectorFactory<Solution_, Score_> getScoreDirectorFactory();
+
+    /**
+     * @return never null
+     */
+    SolutionDescriptor<Solution_> getSolutionDescriptor();
+
+    /**
+     * @return never null
+     */
+    ScoreDefinition<Score_> getScoreDefinition();
+
+    /**
+     * The environment mode this score director was built for,
+     * which decides which assertions it runs.
+     * It is not necessarily the solver's global environment mode:
+     * a phase may override it,
+     * in which case that phase's score director reports the phase's mode.
+     */
+    EnvironmentMode getEnvironmentMode();
+
+    /**
+     * Returns a planning clone of the solution,
+     * which is not a shallow clone nor a deep clone nor a partition clone.
+     *
+     * @return never null, planning clone
+     */
+    default Solution_ cloneWorkingSolution() {
+        return cloneSolution(getWorkingSolution());
+    }
+
+    /**
+     * Returns a planning clone of the solution,
+     * which is not a shallow clone nor a deep clone nor a partition clone.
+     *
+     * @param originalSolution never null
+     * @return never null, planning clone
+     */
+    Solution_ cloneSolution(Solution_ originalSolution);
+
+    /**
+     * @return at least 0L
+     */
+    long getCalculationCount();
+
+    void resetCalculationCount();
+
+    default void incrementCalculationCount() {
+        incrementCalculationCount(1L);
+    }
+
+    void incrementCalculationCount(long count);
+
+    /**
+     * @return never null
+     */
+    SupplyManager getSupplyManager();
+
+    MoveDirector<Solution_, Score_> getMoveDirector();
+
+    ValueRangeManager<Solution_> getValueRangeManager();
+
+    /**
+     * Returns the {@link BasicVariableState}, the single source of truth for the inverse relation
+     * of the given basic {@link PlanningVariable}.
+     *
+     * @param variableDescriptor never null, must not describe a {@link PlanningListVariable}
+     * @return never null
+     */
+    BasicVariableState<Solution_> getBasicVariableState(VariableDescriptor<Solution_> variableDescriptor);
+
+    /**
+     * Returns the {@link ListVariableState}, the single source of truth for all information
+     * about elements inside the given {@link PlanningListVariable}, including its shadow variables.
+     *
+     * @param variableDescriptor never null
+     * @return never null
+     */
+    <Entity_, Value_> ListVariableState<Solution_, Entity_, Value_>
+            getListVariableState(ListVariableDescriptor<Solution_> variableDescriptor);
+
+    InnerScoreDirector<Solution_, Score_> createChildThreadScoreDirector(ChildThreadType childThreadType);
+
+    /**
+     * Asserts that if the {@link Score} is calculated for the parameter solution,
+     * it would be equal to the score of that parameter.
+     *
+     * @param solution never null
+     * @see InnerScoreDirector#assertWorkingScoreFromScratch(InnerScore, Object)
+     */
+    void assertScoreFromScratch(Solution_ solution);
+
+    /**
+     * Do not waste performance by propagating changes to step (or higher) mechanisms.
+     *
+     * @param allChangesWillBeUndoneBeforeStepEnds true if all changes will be undone;
+     *        until reset back to false, any change and resulting before/after events will not be propagated to a neighborhood
+     *        session.
+     *        Moves will only be re-generated once the solution has actually changed,
+     *        which will happen at the end of the step, after {@link #executeMove(Move)} was called.
+     */
+    void setAllChangesWillBeUndoneBeforeStepEnds(boolean allChangesWillBeUndoneBeforeStepEnds);
+
+    /**
+     * Asserts that if the {@link Score} is calculated for the current {@link PlanningSolution working solution}
+     * in the current {@link ScoreDirector} (with possibly incremental calculation residue),
+     * it is equal to the parameter {@link Score expectedWorkingScore}.
+     * <p>
+     * Used to assert that skipping {@link #calculateScore()} (when the score is otherwise determined) is correct.
+     *
+     * @param expectedWorkingScore never null
+     * @param completedAction sometimes null, when assertion fails then the completedAction's {@link Object#toString()}
+     *        is included in the exception message
+     */
+    void assertExpectedWorkingScore(InnerScore<Score_> expectedWorkingScore, Object completedAction);
+
+    /**
+     * Asserts that if all shadow variables are forcibly updated,
+     * and therefore all shadow variables are updated if needed,
+     * that none of the shadow variables of the {@link PlanningSolution working solution} change,
+     * Then also asserts that the {@link Score} calculated for the {@link PlanningSolution working solution} afterwards
+     * is equal to the parameter {@link Score expectedWorkingScore}.
+     * <p>
+     * Used to assert that the shadow variables' state is consistent with the genuine variables' state.
+     *
+     * @param expectedWorkingScore never null
+     * @param completedAction sometimes null, when assertion fails then the completedAction's {@link Object#toString()}
+     *        is included in the exception message
+     */
+    void assertShadowVariablesAreNotStale(InnerScore<Score_> expectedWorkingScore, Object completedAction);
+
+    /**
+     * Asserts that if the {@link Score} is calculated for the current {@link PlanningSolution working solution}
+     * in a fresh {@link ScoreDirector} (with no incremental calculation residue),
+     * it is equal to the parameter {@link Score workingScore}.
+     * <p>
+     * Furthermore, if the assert fails, a score corruption analysis might be included in the exception message.
+     *
+     * @param workingScore never null
+     * @param completedAction sometimes null, when assertion fails then the completedAction's {@link Object#toString()}
+     *        is included in the exception message
+     */
+    void assertWorkingScoreFromScratch(InnerScore<Score_> workingScore, Object completedAction);
+
+    /**
+     * Asserts that if the {@link Score} is calculated for the current {@link PlanningSolution working solution}
+     * in a fresh {@link ScoreDirector} (with no incremental calculation residue),
+     * it is equal to the parameter {@link Score predictedScore}.
+     * <p>
+     * Furthermore, if the assert fails, a score corruption analysis might be included in the exception message.
+     *
+     * @param predictedScore never null
+     * @param completedAction sometimes null, when assertion fails then the completedAction's {@link Object#toString()}
+     *        is included in the exception message
+     */
+    void assertPredictedScoreFromScratch(InnerScore<Score_> predictedScore, Object completedAction);
+
+    /**
+     * Asserts that if the {@link Score} is calculated for the current {@link PlanningSolution working solution}
+     * in the current {@link ScoreDirector} (with incremental calculation residue),
+     * it is equal to the parameter {@link Score beforeMoveScore}.
+     * <p>
+     * Furthermore, if the assert fails, a score corruption analysis might be included in the exception message.
+     *
+     * @param move never null
+     * @param beforeMoveScore never null
+     */
+    void assertExpectedUndoMoveScore(Move<Solution_> move, InnerScore<Score_> beforeMoveScore,
+            SolverLifecyclePoint executionPoint);
+
+    /**
+     * Needs to be called after use because some implementations need to clean up their resources.
+     */
+    @Override
+    void close();
+
+    /**
+     * Unlike {@link #updateShadowVariables()} which only triggers notifications already in the queue,
+     * this updates shadow variables on every genuine variable.
+     * This is useful in {@link SolutionManager#update(Object)} to fill in shadow variable values.
+     */
+    void forceUpdateShadowVariables();
+
+    /**
+     * Exists not to break models.
+     * 
+     * @deprecated use {@link #forceUpdateShadowVariables()} directly.
+     */
+    @Deprecated(since = "2.5.0", forRemoval = true)
+    default void forceTriggerVariableListeners() {
+        forceUpdateShadowVariables();
+    }
+
+    /**
+     * @return true if the last {@link #updateShadowVariables()} did not result in a structurally flawed solutions,
+     *         false otherwise.
+     *         <p>
+     *         Note: Planning models with {@link ShadowVariablesInconsistent} will always result in successful updates.
+     */
+    boolean isLastVariableUpdateSuccessful();
+
+    /**
+     * A derived score director is created from a root score director.
+     * The derived score director can be used to create separate* instances for use cases like multithreaded solving.
+     */
+    default boolean isDerived() {
+        return false;
+    }
+
+    default void beforeEntityAdded(Object entity) {
+        beforeEntityAdded(getSolutionDescriptor().findEntityDescriptorOrFail(entity.getClass()), entity);
+    }
+
+    void beforeEntityAdded(EntityDescriptor<Solution_> entityDescriptor, Object entity);
+
+    default void afterEntityAdded(Object entity) {
+        afterEntityAdded(getSolutionDescriptor().findEntityDescriptorOrFail(entity.getClass()), entity);
+    }
+
+    void afterEntityAdded(EntityDescriptor<Solution_> entityDescriptor, Object entity);
+
+    default void beforeEntityRemoved(Object entity) {
+        beforeEntityRemoved(getSolutionDescriptor().findEntityDescriptorOrFail(entity.getClass()), entity);
+    }
+
+    void beforeEntityRemoved(EntityDescriptor<Solution_> entityDescriptor, Object entity);
+
+    default void afterEntityRemoved(Object entity) {
+        afterEntityRemoved(getSolutionDescriptor().findEntityDescriptorOrFail(entity.getClass()), entity);
+    }
+
+    void afterEntityRemoved(EntityDescriptor<Solution_> entityDescriptor, Object entity);
+
+    void beforeProblemFactAdded(Object problemFact);
+
+    void afterProblemFactAdded(Object problemFact);
+
+    void beforeProblemPropertyChanged(Object problemFactOrEntity);
+
+    void afterProblemPropertyChanged(Object problemFactOrEntity);
+
+    void beforeProblemFactRemoved(Object problemFact);
+
+    void afterProblemFactRemoved(Object problemFact);
+}

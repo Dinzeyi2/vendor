@@ -1,0 +1,124 @@
+use rapier_testbed2d::TestbedViewer;
+use rapier2d::prelude::*;
+
+struct OneWayPlatformHook {
+    platform1: ColliderHandle,
+    platform2: ColliderHandle,
+}
+
+impl PhysicsHooks for OneWayPlatformHook {
+    fn modify_solver_contacts(&self, context: &mut ContactModificationContext) {
+        // The allowed normal for the first platform is its local +y axis, and the
+        // allowed normal for the second platform is its local -y axis.
+        //
+        // Now we have to be careful because the `manifold.local_n1` normal points
+        // toward the outside of the shape of `context.co1`. So we need to flip the
+        // allowed normal direction if the platform is in `context.collider_handle2`.
+        //
+        // Therefore:
+        // - If context.collider_handle1 == self.platform1 then the allowed normal is +y.
+        // - If context.collider_handle2 == self.platform1 then the allowed normal is -y.
+        // - If context.collider_handle1 == self.platform2 then its allowed normal +y needs to be flipped to -y.
+        // - If context.collider_handle2 == self.platform2 then the allowed normal -y needs to be flipped to +y.
+        let mut allowed_local_n1 = Vector::ZERO;
+
+        if context.collider1 == self.platform1 {
+            allowed_local_n1 = Vector::Y;
+        } else if context.collider2 == self.platform1 {
+            // Flip the allowed direction.
+            allowed_local_n1 = -Vector::Y;
+        }
+
+        if context.collider1 == self.platform2 {
+            allowed_local_n1 = -Vector::Y;
+        } else if context.collider2 == self.platform2 {
+            // Flip the allowed direction.
+            allowed_local_n1 = Vector::Y;
+        }
+
+        // Call the helper function that simulates one-way platforms.
+        context.update_as_oneway_platform(allowed_local_n1, 0.1);
+
+        // Set the surface velocity of the accepted contacts.
+        let tangent_velocity =
+            if context.collider1 == self.platform1 || context.collider2 == self.platform2 {
+                -12.0
+            } else {
+                12.0
+            };
+
+        if let Some(rigid) = context.rigid_mut() {
+            for contact in rigid.solver_contacts.iter_mut() {
+                contact.tangent_velocity.x = tangent_velocity;
+            }
+        }
+    }
+}
+
+pub async fn run(viewer: &mut TestbedViewer) -> anyhow::Result<()> {
+    /*
+     * World
+     */
+    let mut world = PhysicsWorld::new();
+
+    /*
+     * Ground
+     */
+    let rigid_body = RigidBodyBuilder::fixed();
+    let collider = ColliderBuilder::cuboid(25.0, 0.5)
+        .translation(Vector::new(30.0, 2.0))
+        .active_hooks(ActiveHooks::MODIFY_SOLVER_CONTACTS);
+    let (handle, platform1) = world.insert(rigid_body, collider);
+    let collider = ColliderBuilder::cuboid(25.0, 0.5)
+        .translation(Vector::new(-30.0, -2.0))
+        .active_hooks(ActiveHooks::MODIFY_SOLVER_CONTACTS);
+    let platform2 = world.insert_collider(collider, Some(handle));
+
+    /*
+     * Setup the one-way platform hook.
+     */
+    let physics_hooks = OneWayPlatformHook {
+        platform1,
+        platform2,
+    };
+
+    /*
+     * Set up the testbed.
+     */
+    viewer.set_world(&mut world);
+    viewer.look_at(Vec2::ZERO, 20.0);
+
+    let mut step_id = 0usize;
+    while viewer.render_frame(&mut world).await {
+        if viewer.simulating() {
+            world.step_with_events(&physics_hooks, &());
+            step_id += 1;
+
+            /*
+             * Spawn cubes at regular intervals and apply a custom gravity
+             * depending on their position.
+             */
+            if step_id.is_multiple_of(200) && world.bodies.len() <= 7 {
+                // Spawn a new cube.
+                let collider = ColliderBuilder::cuboid(1.5, 2.0);
+                let body = RigidBodyBuilder::dynamic().translation(Vector::new(20.0, 10.0));
+                let handle = world.bodies.insert(body);
+                world
+                    .colliders
+                    .insert_with_parent(collider, handle, &mut world.bodies);
+
+                viewer.add_body(handle, &world);
+            }
+
+            for handle in world.islands.active_bodies() {
+                let body = &mut world.bodies[handle];
+                if body.position().translation.y > 1.0 {
+                    body.set_gravity_scale(1.0, false);
+                } else if body.position().translation.y < -1.0 {
+                    body.set_gravity_scale(-1.0, false);
+                }
+            }
+        }
+    }
+    Ok(())
+}

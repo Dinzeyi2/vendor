@@ -1,0 +1,56 @@
+package ai.timefold.solver.core.impl.score.stream.common.inliner;
+
+import java.math.BigDecimal;
+import java.util.Map;
+
+import ai.timefold.solver.core.api.score.HardMediumSoftBigDecimalScore;
+import ai.timefold.solver.core.api.score.stream.Constraint;
+import ai.timefold.solver.core.impl.score.ScoreUtil;
+import ai.timefold.solver.core.impl.score.constraint.ConstraintMatchPolicy;
+import ai.timefold.solver.core.impl.score.stream.common.AbstractConstraint;
+
+import org.jspecify.annotations.NullMarked;
+
+@NullMarked
+final class HardMediumSoftBigDecimalScoreInliner extends AbstractScoreInliner<HardMediumSoftBigDecimalScore> {
+
+    BigDecimal hardScore = BigDecimal.ZERO;
+    BigDecimal mediumScore = BigDecimal.ZERO;
+    BigDecimal softScore = BigDecimal.ZERO;
+
+    HardMediumSoftBigDecimalScoreInliner(Map<Constraint, HardMediumSoftBigDecimalScore> constraintWeightMap,
+            ConstraintMatchPolicy constraintMatchPolicy) {
+        super(constraintWeightMap, constraintMatchPolicy);
+    }
+
+    @Override
+    public WeightedScoreImpacter<HardMediumSoftBigDecimalScore, ?>
+            buildWeightedScoreImpacter(AbstractConstraint<?, ?, ?> constraint) {
+        var constraintWeight = constraintWeightMap.get(constraint);
+        var hardConstraintWeight = constraintWeight.hardScore();
+        var mediumConstraintWeight = constraintWeight.mediumScore();
+        var softConstraintWeight = constraintWeight.softScore();
+        var context =
+                new HardMediumSoftBigDecimalScoreContext(this, constraint, constraintWeight);
+        if (ScoreUtil.isZero(mediumConstraintWeight) && ScoreUtil.isZero(softConstraintWeight)) {
+            return WeightedScoreImpacter.of(context, HardMediumSoftBigDecimalScoreContext::changeHardScoreBy);
+        } else if (ScoreUtil.isZero(hardConstraintWeight) && ScoreUtil.isZero(softConstraintWeight)) {
+            return WeightedScoreImpacter.of(context, HardMediumSoftBigDecimalScoreContext::changeMediumScoreBy);
+        } else if (ScoreUtil.isZero(hardConstraintWeight) && ScoreUtil.isZero(mediumConstraintWeight)) {
+            return WeightedScoreImpacter.of(context, HardMediumSoftBigDecimalScoreContext::changeSoftScoreBy);
+        } else {
+            return WeightedScoreImpacter.of(context, HardMediumSoftBigDecimalScoreContext::changeScoreBy);
+        }
+    }
+
+    @Override
+    public HardMediumSoftBigDecimalScore extractScore() {
+        return HardMediumSoftBigDecimalScore.of(hardScore, mediumScore, softScore);
+    }
+
+    @Override
+    public String toString() {
+        return HardMediumSoftBigDecimalScore.class.getSimpleName() + " inliner";
+    }
+
+}

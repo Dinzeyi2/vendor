@@ -1,0 +1,134 @@
+package ai.timefold.solver.core.impl.domain.variable.descriptor;
+
+import ai.timefold.solver.core.api.domain.solution.PlanningSolution;
+import ai.timefold.solver.core.api.domain.variable.PlanningVariable;
+import ai.timefold.solver.core.impl.domain.common.accessor.MemberAccessor;
+import ai.timefold.solver.core.impl.domain.entity.descriptor.EntityDescriptor;
+import ai.timefold.solver.core.impl.domain.policy.DescriptorPolicy;
+import ai.timefold.solver.core.impl.domain.solution.descriptor.SolutionDescriptor;
+import ai.timefold.solver.core.preview.api.domain.metamodel.VariableMetaModel;
+
+/**
+ * @param <Solution_> the solution type, the class with the {@link PlanningSolution} annotation
+ */
+public abstract class VariableDescriptor<Solution_> {
+
+    protected final int ordinal;
+    private final int globalOrdinal;
+    protected final EntityDescriptor<Solution_> entityDescriptor;
+    protected final MemberAccessor variableMemberAccessor;
+    protected final String variableName;
+    protected final String simpleEntityAndVariableName;
+    protected VariableMetaModel<Solution_, ?, ?> cachedMetamodel = null;
+
+    // ************************************************************************
+    // Constructors and simple getters/setters
+    // ************************************************************************
+
+    protected VariableDescriptor(int ordinal, EntityDescriptor<Solution_> entityDescriptor,
+            MemberAccessor variableMemberAccessor) {
+        this(ordinal, entityDescriptor, variableMemberAccessor, false);
+    }
+
+    protected VariableDescriptor(int ordinal, EntityDescriptor<Solution_> entityDescriptor,
+            MemberAccessor variableMemberAccessor, boolean allowPrimitive) {
+        if (!allowPrimitive && variableMemberAccessor.getType().isPrimitive()) {
+            // uninitialized variables only apply to genuine planning variables;
+            // shadow variables can use primitives
+            throw new IllegalStateException("""
+                    The entityClass (%s) has a @%s annotated member (%s) that returns a primitive type (%s).
+                    This means it cannot represent an uninitialized variable as null \
+                    and the Construction Heuristics think it's already initialized.
+                    Maybe let the member (%s) return its primitive wrapper type instead."""
+                    .formatted(entityDescriptor.getEntityClass(),
+                            PlanningVariable.class.getSimpleName(),
+                            variableMemberAccessor,
+                            variableMemberAccessor.getType(),
+                            getSimpleEntityAndVariableName()));
+        }
+        this.ordinal = ordinal;
+        this.globalOrdinal = entityDescriptor.getVariableOrdinalOffset() + ordinal;
+        this.entityDescriptor = entityDescriptor;
+        this.variableMemberAccessor = variableMemberAccessor;
+        this.variableName = variableMemberAccessor.getName();
+        this.simpleEntityAndVariableName = entityDescriptor.getEntityClass().getSimpleName() + "." + variableName;
+    }
+
+    /**
+     * A number unique within the declaring {@link EntityDescriptor}, increasing sequentially from zero.
+     * For a number unique within the {@link SolutionDescriptor}, use {@link #getGlobalOrdinal()}.
+     *
+     * @return zero or higher
+     */
+    public int getOrdinal() {
+        return ordinal;
+    }
+
+    /**
+     * A number unique within a {@link SolutionDescriptor}, increasing sequentially from zero.
+     * Use it as an array index; {@link SolutionDescriptor#getVariableDescriptorCount()} gives the array size.
+     *
+     * @return zero or higher
+     */
+    public int getGlobalOrdinal() {
+        return globalOrdinal;
+    }
+
+    public EntityDescriptor<Solution_> getEntityDescriptor() {
+        return entityDescriptor;
+    }
+
+    public String getVariableName() {
+        return variableName;
+    }
+
+    public String getSimpleEntityAndVariableName() {
+        return simpleEntityAndVariableName;
+    }
+
+    public Class<?> getVariablePropertyType() {
+        return variableMemberAccessor.getType();
+    }
+
+    public abstract void linkVariableDescriptors(DescriptorPolicy descriptorPolicy);
+
+    public final boolean isListVariable() {
+        return this instanceof ListVariableDescriptor;
+    }
+
+    /**
+     * @param value never null
+     * @return true if it might be an anchor, false if it is definitely not an anchor
+     */
+    public boolean isValuePotentialAnchor(Object value) {
+        return !entityDescriptor.getEntityClass().isAssignableFrom(value.getClass());
+    }
+
+    @SuppressWarnings("unchecked")
+    public <Value_> Value_ getValue(Object entity) {
+        return (Value_) variableMemberAccessor.executeGetter(entity);
+    }
+
+    public void setValue(Object entity, Object value) {
+        variableMemberAccessor.executeSetter(entity, value);
+    }
+
+    public String getMemberAccessorSpeedNote() {
+        return variableMemberAccessor.getSpeedNote();
+    }
+
+    public final boolean isGenuineAndUninitialized(Object entity) {
+        return this instanceof GenuineVariableDescriptor<Solution_> genuineVariableDescriptor
+                && !genuineVariableDescriptor.isInitialized(entity);
+    }
+
+    @SuppressWarnings("unchecked")
+    public <Entity_, Value_> VariableMetaModel<Solution_, Entity_, Value_> getVariableMetaModel() {
+        if (cachedMetamodel != null) {
+            return (VariableMetaModel<Solution_, Entity_, Value_>) cachedMetamodel;
+        }
+        cachedMetamodel = entityDescriptor.getEntityMetaModel()
+                .variable(variableName);
+        return (VariableMetaModel<Solution_, Entity_, Value_>) cachedMetamodel;
+    }
+}

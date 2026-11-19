@@ -1,0 +1,361 @@
+package ai.timefold.solver.core.impl.solver;
+
+import java.util.Collections;
+import java.util.List;
+import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
+
+import ai.timefold.solver.core.api.domain.common.PlanningId;
+import ai.timefold.solver.core.api.domain.solution.PlanningSolution;
+import ai.timefold.solver.core.api.solver.Solver;
+import ai.timefold.solver.core.api.solver.change.ProblemChange;
+import ai.timefold.solver.core.config.solver.EnvironmentMode;
+import ai.timefold.solver.core.config.solver.monitoring.SolverMetric;
+import ai.timefold.solver.core.impl.domain.variable.descriptor.ListVariableDescriptor;
+import ai.timefold.solver.core.impl.phase.Phase;
+import ai.timefold.solver.core.impl.score.director.InnerScoreDirector;
+import ai.timefold.solver.core.impl.score.director.ScoreDirectorFactory;
+import ai.timefold.solver.core.impl.solver.event.SolveEventProducerId;
+import ai.timefold.solver.core.impl.solver.monitoring.SolverTags;
+import ai.timefold.solver.core.impl.solver.random.RandomSource;
+import ai.timefold.solver.core.impl.solver.recaller.BestSolutionRecaller;
+import ai.timefold.solver.core.impl.solver.scope.SolverScope;
+import ai.timefold.solver.core.impl.solver.termination.BasicPlumbingTermination;
+import ai.timefold.solver.core.impl.solver.termination.UniversalTermination;
+import ai.timefold.solver.core.impl.util.MathUtils;
+
+import org.jspecify.annotations.NullMarked;
+
+import io.micrometer.core.instrument.Metrics;
+
+/**
+ * Default implementation for {@link Solver}.
+ *
+ * @param <Solution_> the solution type, the class with the {@link PlanningSolution} annotation
+ * @see Solver
+ * @see AbstractSolver
+ */
+@NullMarked
+public class DefaultSolver<Solution_> extends AbstractSolver<Solution_> {
+
+    private final Supplier<RandomSource> randomFactory;
+    private final BasicPlumbingTermination<Solution_> basicPlumbingTermination;
+    private final AtomicBoolean solving = new AtomicBoolean(false);
+    private final SolverScope<Solution_> solverScope;
+    private final String moveThreadCountDescription;
+
+    // ************************************************************************
+    // Constructors and simple getters/setters
+    // ************************************************************************
+
+    public DefaultSolver(EnvironmentMode globalEnvironmentMode, ScoreDirectorFactory<Solution_, ?> scoreDirectorFactory,
+            Supplier<RandomSource> randomFactory, BestSolutionRecaller<Solution_> bestSolutionRecaller,
+            BasicPlumbingTermination<Solution_> basicPlumbingTermination, UniversalTermination<Solution_> termination,
+            List<Phase<Solution_>> phaseList, SolverScope<Solution_> solverScope, String moveThreadCountDescription) {
+        super(globalEnvironmentMode, scoreDirectorFactory, bestSolutionRecaller, termination, phaseList);
+        this.randomFactory = randomFactory;
+        this.basicPlumbingTermination = basicPlumbingTermination;
+        this.solverScope = solverScope;
+        solverScope.setSolver(this);
+        this.moveThreadCountDescription = moveThreadCountDescription;
+    }
+
+    public RandomSource getRandomSource() {
+        return randomFactory.get();
+    }
+
+    public SolverScope<Solution_> getSolverScope() {
+        return solverScope;
+    }
+
+    // ************************************************************************
+    // Complex getters
+    // ************************************************************************
+
+    public long getTimeMillisSpent() {
+        return solverScope.getTimeMillisSpent();
+    }
+
+    public long getScoreCalculationCount() {
+        return solverScope.getScoreCalculationCount();
+    }
+
+    public long getMoveEvaluationCount() {
+        return solverScope.getMoveEvaluationCount();
+    }
+
+    public long getScoreCalculationSpeed() {
+        return solverScope.getScoreCalculationSpeed();
+    }
+
+    public long getMoveEvaluationSpeed() {
+        return solverScope.getMoveEvaluationSpeed();
+    }
+
+    @Override
+    public boolean isSolving() {
+        return solving.get();
+    }
+
+    @Override
+    public boolean terminateEarly() {
+        var terminationEarlySuccessful = basicPlumbingTermination.terminateEarly();
+        if (terminationEarlySuccessful) {
+            LOGGER.info("Terminating solver early.");
+        }
+        return terminationEarlySuccessful;
+    }
+
+    @Override
+    public boolean isTerminateEarly() {
+        return basicPlumbingTermination.isTerminateEarlyRequested();
+    }
+
+    @Override
+    public void addProblemChange(ProblemChange<Solution_> problemChange) {
+        addProblemChanges(Collections.singletonList(problemChange));
+    }
+
+    @Override
+    public void addProblemChanges(List<ProblemChange<Solution_>> problemChangeList) {
+        Objects.requireNonNull(problemChangeList,
+                () -> "The list of problem changes (%s) cannot be null."
+                        .formatted(problemChangeList));
+        basicPlumbingTermination.addProblemChanges(problemChangeList);
+    }
+
+    @Override
+    public boolean isEveryProblemChangeProcessed() {
+        return basicPlumbingTermination.isEveryProblemChangeProcessed();
+    }
+
+    public void setMonitorTags(SolverTags solverTags) {
+        solverScope.setMonitoringTags(solverTags.asTags());
+    }
+
+    // ************************************************************************
+    // Worker methods
+    // ************************************************************************
+
+    @Override
+    public final Solution_ solve(Solution_ problem) {
+        return solveAndSummarize(problem).solution();
+    }
+
+    @Override
+    public final DefaultSolverRunResult<Solution_> solveAndSummarize(Solution_ problem) {
+        // No tags for these metrics; they are global
+        var solveLengthTimer = Metrics.more().longTaskTimer(SolverMetric.SOLVE_DURATION.getMeterId());
+        var errorCounter = Metrics.counter(SolverMetric.ERROR_COUNT.getMeterId());
+
+        solverScope.setInitialSolution(Objects.requireNonNull(problem, "The problem must not be null."), true);
+        solverScope.setSolver(this);
+        outerSolvingStarted(solverScope);
+
+        var restartSolver = true;
+        while (restartSolver) {
+            var sample = solveLengthTimer.start();
+            try {
+                // solvingStarted will call registerSolverSpecificMetrics(), since
+                // the solverScope need to be fully initialized to calculate the
+                // problem's scale metrics
+                solvingStarted(solverScope);
+                runPhases(solverScope);
+                solvingEnded(solverScope);
+            } catch (Exception e) {
+                errorCounter.increment();
+                solvingError(solverScope, e);
+                throw e;
+            } finally {
+                sample.stop();
+                unregisterSolverSpecificMetrics();
+            }
+            restartSolver = checkProblemChanges();
+        }
+        // Before outerSolvingEnded, which lets another solve() start and clear it.
+        var terminatedEarly = basicPlumbingTermination.isRunEndedByTerminateEarly();
+        outerSolvingEnded(solverScope);
+        return new DefaultSolverRunResult<>(solverScope.getBestSolution(),
+                DefaultSolverRunSummary.of(solverScope, terminatedEarly));
+    }
+
+    public void outerSolvingStarted(SolverScope<Solution_> solverScope) {
+        solving.set(true);
+        basicPlumbingTermination.solvingStarted();
+        solverScope.setStartingSolverCount(0);
+        solverScope.setWorkingRandom(randomFactory.get());
+        solverScope.getSolverStatistics().solvingStarted();
+    }
+
+    @Override
+    public void solvingStarted(SolverScope<Solution_> solverScope) {
+        assertCorrectSolutionState();
+        solverScope.startingNow();
+        solverScope.getScoreDirector().resetCalculationCount();
+        super.solvingStarted(solverScope);
+        var startingSolverCount = solverScope.getStartingSolverCount() + 1;
+        solverScope.setStartingSolverCount(startingSolverCount);
+        registerSolverSpecificMetrics();
+
+        // Update the best solution, since problem's shadows and score were updated
+        bestSolutionRecaller.updateBestSolutionAndFireIfInitialized(solverScope,
+                SolveEventProducerId.SOLVING_STARTED);
+        if (LOGGER.isInfoEnabled()) { // Formatting is expensive here.
+            LOGGER.info("Solving {}: time spent ({}), best score ({}), "
+                    + "default environment mode ({}), move thread count ({}), random ({}).",
+                    (startingSolverCount == 1 ? "started" : "restarted"),
+                    solverScope.calculateTimeMillisSpentUpToNow(),
+                    solverScope.getBestScore().raw(),
+                    globalEnvironmentMode.name(),
+                    moveThreadCountDescription,
+                    randomFactory);
+            var problemSizeStatistics = solverScope.getProblemSizeStatistics();
+            LOGGER.info(
+                    "Problem scale: genuine entity count ({}), genuine variable count ({}), approximate value count ({}), approximate problem scale ({}).",
+                    problemSizeStatistics.entityCount(), problemSizeStatistics.variableCount(),
+                    problemSizeStatistics.approximateValueCount(),
+                    problemSizeStatistics.approximateProblemScaleAsFormattedString());
+            if (LOGGER.isDebugEnabled()) {
+                var genuineEntityClassCountEntries = problemSizeStatistics.genuineEntityClassToEntityCount().entrySet();
+                var solutionDescriptor = solverScope.getSolutionDescriptor();
+                for (var genuineEntityCountEntry : genuineEntityClassCountEntries) {
+                    var geninueEntityClass = genuineEntityCountEntry.getKey();
+                    var entityDescriptor = solutionDescriptor.findEntityDescriptorOrFail(geninueEntityClass);
+                    LOGGER.debug("    Entity ({}) count: {}",
+                            geninueEntityClass.getCanonicalName(),
+                            genuineEntityCountEntry.getValue());
+                    for (var geninueVariableEntry : problemSizeStatistics
+                            .genuineEntityClassToVariableToValueCount()
+                            .get(geninueEntityClass).entrySet()) {
+                        var genuineVariable = geninueVariableEntry.getKey();
+                        var variableDescriptor = entityDescriptor.getGenuineVariableDescriptor(genuineVariable);
+                        LOGGER.debug("        {} ({}) estimated value ({}) count: {}",
+                                (variableDescriptor instanceof ListVariableDescriptor) ? "List variable" : "Variable",
+                                genuineVariable,
+                                (variableDescriptor instanceof ListVariableDescriptor<?> listVariableDescriptor)
+                                        ? listVariableDescriptor.getElementType().getCanonicalName()
+                                        : variableDescriptor.getVariablePropertyType().getCanonicalName(),
+                                geninueVariableEntry.getValue());
+                    }
+                }
+            }
+        }
+    }
+
+    private void registerSolverSpecificMetrics() {
+        solverScope.getSolverMetricSet().forEach(solverMetric -> solverMetric.register(this));
+    }
+
+    private void unregisterSolverSpecificMetrics() {
+        solverScope.getSolverMetricSet().forEach(solverMetric -> solverMetric.unregister(this));
+    }
+
+    private void assertCorrectSolutionState() {
+        var bestSolution = solverScope.getBestSolution();
+        solverScope.getSolutionDescriptor().visitAllProblemFacts(bestSolution, this::assertNonNullPlanningId);
+        solverScope.getSolutionDescriptor().visitAllEntities(bestSolution, entity -> {
+            assertNonNullPlanningId(entity);
+            // Ensure correct state of pinning properties.
+            var entityDescriptor = solverScope.getSolutionDescriptor().findEntityDescriptorOrFail(entity.getClass());
+            if (!entityDescriptor.supportsPinning() || !entityDescriptor.hasAnyListVariables()) {
+                return;
+            }
+            var listVariableDescriptor = entityDescriptor.getListVariableDescriptor();
+            var pinIndex = listVariableDescriptor.getFirstUnpinnedIndex(entity);
+            if (entityDescriptor.isMovable(solverScope.getScoreDirector().getWorkingSolution(), entity)) {
+                if (pinIndex < 0) {
+                    throw new IllegalStateException("The movable planning entity (%s) has a pin index (%s) which is negative."
+                            .formatted(entity, pinIndex));
+                }
+                var listSize = listVariableDescriptor.getListSize(entity);
+                if (pinIndex > listSize) {
+                    // pinIndex == listSize is allowed, as that says the pin is at the end of the list,
+                    // allowing additions to the list.
+                    throw new IllegalStateException(
+                            "The movable planning entity (%s) has a pin index (%s) which is greater than the list size (%s)."
+                                    .formatted(entity, pinIndex, listSize));
+                }
+            } else {
+                if (pinIndex != 0) {
+                    throw new IllegalStateException("The immovable planning entity (%s) has a pin index (%s) which is not 0."
+                            .formatted(entity, pinIndex));
+                }
+            }
+        });
+    }
+
+    private void assertNonNullPlanningId(Object fact) {
+        var factClass = fact.getClass();
+        var planningIdAccessor = solverScope.getSolutionDescriptor().getPlanningIdAccessor(factClass);
+        if (planningIdAccessor == null) { // There is no planning ID annotation.
+            return;
+        }
+        var id = planningIdAccessor.executeGetter(fact);
+        if (id == null) { // Fail fast as planning ID is null.
+            throw new IllegalStateException("The planningId (" + id + ") of the member (" + planningIdAccessor
+                    + ") of the class (" + factClass + ") on object (" + fact + ") must not be null.\n"
+                    + "Maybe initialize the planningId of the class (" + planningIdAccessor.getDeclaringClass()
+                    + ") instance (" + fact + ") before solving.\n" +
+                    "Maybe remove the @" + PlanningId.class.getSimpleName() + " annotation.");
+        }
+    }
+
+    @Override
+    public void solvingEnded(SolverScope<Solution_> solverScope) {
+        super.solvingEnded(solverScope);
+        solverScope.endingNow();
+    }
+
+    public void outerSolvingEnded(SolverScope<Solution_> solverScope) {
+        var solverStatistics = solverScope.getSolverStatistics();
+        var timeMillisSpent = solverStatistics.getTimeMillisSpent();
+        LOGGER.info("Solving ended: time spent ({}), best score ({}), move evaluation speed ({}/sec), "
+                + "phase total ({}), environment mode ({}), move thread count ({}).",
+                timeMillisSpent,
+                solverScope.getBestScore().raw(),
+                MathUtils.getSpeed(solverStatistics.getMoveEvaluationCount(), timeMillisSpent),
+                phaseList.size(),
+                globalEnvironmentMode.name(),
+                moveThreadCountDescription);
+        solving.set(false);
+    }
+
+    private boolean checkProblemChanges() {
+        var restartSolver = basicPlumbingTermination.waitForRestartSolverDecision();
+        if (!restartSolver) {
+            return false;
+        } else {
+            // The score director is created and closed during the phase events.
+            // This check occurs after all phases have been completed,
+            // which means the score director is already closed.
+            // As a result,
+            // we need to recreate the score director to apply any real-time changes to the problem.
+            prepareForProblemChanges(solverScope);
+            var problemChangeQueue = basicPlumbingTermination
+                    .startProblemChangesProcessing();
+            var stepIndex = 0;
+            var problemChange = problemChangeQueue.poll();
+            while (problemChange != null) {
+                problemChange.doChange(solverScope.getWorkingSolution(), solverScope.getProblemChangeDirector());
+                solverScope.getScoreDirector().updateShadowVariables();
+                LOGGER.debug("    Real-time problem change applied; step index ({}).", stepIndex);
+                stepIndex++;
+                problemChange = problemChangeQueue.poll();
+            }
+            // All PFCs are processed, fail fast if any of the new facts have null planning IDs.
+            InnerScoreDirector<Solution_, ?> scoreDirector = solverScope.getScoreDirector();
+            assertCorrectSolutionState();
+            // Everything is fine, proceed.
+            var score = scoreDirector.calculateScore();
+            basicPlumbingTermination.endProblemChangesProcessing();
+            // We update the initial solution to ensure the related events use an updated instance
+            solverScope.setInitialSolution(solverScope.cloneWorkingSolution(), false);
+            bestSolutionRecaller.updateBestSolutionAndFireIfInitialized(solverScope,
+                    SolveEventProducerId.PROBLEM_CHANGE);
+            LOGGER.info("Real-time problem fact changes done: step total ({}), new best score ({}).",
+                    stepIndex, score);
+            return true;
+        }
+    }
+}

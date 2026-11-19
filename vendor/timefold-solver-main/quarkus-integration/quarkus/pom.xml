@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>ai.timefold.solver</groupId>
+    <artifactId>timefold-solver-quarkus-integration</artifactId>
+    <version>${revision}</version>
+  </parent>
+
+  <artifactId>timefold-solver-quarkus-parent</artifactId>
+  <packaging>pom</packaging>
+
+  <name>Timefold Solver Quarkus</name>
+  <url>https://solver.timefold.ai</url>
+
+  <modules>
+    <module>runtime</module>
+    <module>deployment</module>
+    <module>integration-test</module>
+    <module>reflection-integration-test</module>
+    <module>devui-integration-test</module>
+  </modules>
+
+  <!-- Fixes quarkus https://github.com/microprofile/microprofile-config/issues/811 -->
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.eclipse.microprofile.config</groupId>
+        <artifactId>microprofile-config-api</artifactId>
+        <version>${version.org.eclipse.microprofile.config}</version>
+        <scope>compile</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+  <dependencies>
+    <dependency>
+      <groupId>org.eclipse.microprofile.config</groupId>
+      <artifactId>microprofile-config-api</artifactId>
+    </dependency>
+  </dependencies>
+</project>

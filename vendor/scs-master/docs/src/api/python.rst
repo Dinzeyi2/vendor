@@ -1,0 +1,208 @@
+.. _python_interface:
+
+Python
+======
+
+After :ref:`installing <python_install>` you can import SCS using
+
+.. code:: python
+
+  import scs
+
+This module provides the :code:`SCS` class which is initialized using:
+
+.. code:: python
+
+  solver = scs.SCS(data,
+                  cone,
+                  linear_solver=scs.LinearSolver.AUTO,
+                  verbose=True,
+                  normalize=True,
+                  max_iters=int(1e5),
+                  scale=0.1,
+                  adaptive_scale=True,
+                  adaptive_diag_scale=True,
+                  eps_abs=1e-4,
+                  eps_rel=1e-4,
+                  eps_infeas=1e-7,
+                  alpha=1.5,
+                  rho_x=1e-6,
+                  acceleration_lookback=10,
+                  acceleration_interval=5,
+                  acceleration_type_1=1,
+                  acceleration_regularization=1e-8,
+                  acceleration_relaxation=1.0,
+                  time_limit_secs=0,
+                  write_data_filename=None,
+                  log_csv_filename=None)
+
+where :code:`data` is a dict containing :code:`P, A, b, c`, and :code:`cone` is
+a dict that contains the :ref:`cones` information. The :code:`cone` dict
+contains keys corresponding to the cone type and values corresponding to either
+the cone length or the array that defines the cone (see the third column in
+:ref:`cones` for the keys and what the corresponding values represent).  The
+:code:`b`, and :code:`c` entries must be 1d numpy arrays and the :code:`P` and
+:code:`A` entries must be scipy sparse matrices in CSC format; if they are not
+of the proper format, SCS will attempt to convert them.
+
+Linear solver selection
+-----------------------
+
+The :code:`linear_solver` setting controls which :ref:`linear_solver` backend
+SCS uses. It accepts a :code:`scs.LinearSolver` enum value.
+The default is :code:`AUTO`, which selects the best available solver for
+the platform:
+
+- **macOS**: QDLDL (Apple Accelerate is available via :code:`LinearSolver.ACCELERATE`)
+- **Linux / Windows**: MKL Pardiso if available (built into the x86-64
+  manylinux wheels), otherwise QDLDL
+
+.. list-table::
+   :header-rows: 1
+
+   * - Value
+     - Description
+   * - :code:`AUTO`
+     - Auto-detect best available solver (default).
+   * - :code:`QDLDL`
+     - :ref:`Sparse direct <direct>` solver using `QDLDL
+       <https://github.com/oxfordcontrol/qdldl>`_ (always available).
+   * - :code:`CPU_INDIRECT`
+     - Sparse indirect solver using conjugate gradients (runs on CPU).
+   * - :code:`MKL`
+     - Intel MKL Pardiso direct solver (built into the x86-64 manylinux wheels,
+       or an :ref:`MKL build <python_install>`).
+   * - :code:`ACCELERATE`
+     - :ref:`Apple Accelerate <apple_accelerate>` sparse LDL\ :sup:`T` (macOS
+       only, included automatically).
+   * - :code:`CPU_DENSE`
+     - Dense direct solver via LAPACK (in the wheels and in a default source
+       build, see :ref:`python_install`).
+   * - :code:`GPU_INDIRECT`
+     - Sparse GPU indirect solver (requires a :ref:`GPU build <python_gpu_indirect_install>`).
+   * - :code:`CUDSS`
+     - Sparse GPU direct solver via cuDSS (requires a :ref:`cuDSS build <python_cudss_install>`).
+
+Example:
+
+.. code:: python
+
+  # Use the default (auto-detect)
+  solver = scs.SCS(data, cone)
+
+  # Explicitly select a solver
+  solver = scs.SCS(data, cone, linear_solver=scs.LinearSolver.QDLDL)
+
+The remaining fields are explained in :ref:`settings`.
+
+Cone dict
+---------
+
+The :code:`cone` dict supports the following keys (see :ref:`cones` for mathematical
+definitions):
+
+.. list-table::
+   :header-rows: 1
+
+   * - Key
+     - Value
+     - Description
+   * - :code:`z`
+     - :code:`int`
+     - Zero cone length.
+   * - :code:`l`
+     - :code:`int`
+     - Non-negative cone length.
+   * - :code:`bu`, :code:`bl`
+     - :code:`array`
+     - Box cone upper/lower bounds (length :math:`\text{bsize}-1`).
+   * - :code:`q`
+     - :code:`list[int]`
+     - Second-order cone lengths.
+   * - :code:`s`
+     - :code:`list[int]`
+     - PSD cone matrix dimensions.
+   * - :code:`cs`
+     - :code:`list[int]`
+     - Complex PSD cone matrix dimensions.
+   * - :code:`ep`
+     - :code:`int`
+     - Number of primal exponential cone triples.
+   * - :code:`ed`
+     - :code:`int`
+     - Number of dual exponential cone triples.
+   * - :code:`p`
+     - :code:`list[float]`
+     - Power cone parameters in :math:`[-1, 1]`.
+
+.. _python_spectral_cone_keys:
+
+**Spectral cone keys** (require :ref:`spectral cone build <python_spectral_install>`):
+
+.. list-table::
+   :header-rows: 1
+
+   * - Key
+     - Value
+     - Description
+   * - :code:`d`
+     - :code:`list[int]`
+     - Log-determinant cone matrix dimensions.
+   * - :code:`nuc_m`, :code:`nuc_n`
+     - :code:`list[int]`
+     - Nuclear norm cone matrix row/column dimensions (must be equal length, :math:`m_i \geq n_i`).
+   * - :code:`ell1`
+     - :code:`list[int]`
+     - :math:`\ell_1` norm cone vector dimensions.
+   * - :code:`sl_n`, :code:`sl_k`
+     - :code:`list[int]`
+     - Sum-of-largest-eigenvalues cone matrix dimensions and :math:`k` values (must be equal length, :math:`0 < k_i < n_i`).
+
+Then to solve the problem call:
+
+.. code:: python
+
+   sol = solver.solve(warm_start=True, x=None, y=None, s=None)
+
+where :code:`warm_start` indicates whether the solve will reuse the previous
+solution as a warm-start (if this is the first solve it initializes at zero).
+A good warm-start can reduce the overall number of iterations required to solve
+a problem. 1d Numpy arrays :code:`x,y,s` are (optional) warm-start overrides if
+you wish to set these manually rather than use solution to the last problem as
+the warm-start.
+
+At termination :code:`sol` is a dict with fields :code:`x, y, s, info` where
+:code:`x, y, s` contains the primal-dual :ref:`solution <optimality>` or the
+:ref:`certificate of infeasibility <infeasibility>`, and :code:`info` is a dict
+containing the solve :ref:`info`. Detailed Anderson acceleration diagnostics are
+available in :code:`sol["info"]["aa_stats"]`.
+
+To re-use the workspace and solve a similar problem with new :code:`b`
+and / or :code:`c` data, we can update the solver using:
+
+.. code:: python
+
+   solver.update(b=new_b, c=new_c)  # update b and c vectors (can be None)
+   solver.solve()  # solve new problem with updated b and c
+
+The settings that only the solve reads, :code:`time_limit_secs`,
+:code:`max_iters`, :code:`eps_abs`, :code:`eps_rel`, :code:`eps_infeas`,
+:code:`alpha`, :code:`verbose` and :code:`log_csv_filename`, can be changed
+the same way, alone or together with :code:`b` and :code:`c` (new after SCS
+3.3.2; see :ref:`update_settings`):
+
+.. code:: python
+
+   solver.update(time_limit_secs=10.0, eps_abs=1e-6)  # kept for later solves
+   solver.solve()
+
+Only the settings you pass change, and they stay in force for every later
+solve until you change them again. Passing a setting that was used to set up
+the solver (for example :code:`scale`, :code:`rho_x`, :code:`normalize` or
+:code:`linear_solver`) raises :code:`ValueError` and changes nothing: create
+a new :code:`SCS` object to change it. An unknown name raises
+:code:`TypeError`. Changing only settings does not change the
+:code:`setup_time` reported in :code:`info`. See :ref:`update_settings` for
+when this helps (for example, to make a time limit cover the setup as well)
+and what it does not change.
+

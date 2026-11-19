@@ -1,0 +1,428 @@
+package ai.timefold.solver.core.preview.api.move.builtin;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import ai.timefold.solver.core.impl.move.builtin.PillarSwapMove;
+import ai.timefold.solver.core.preview.api.domain.metamodel.PlanningEntityMetaModel;
+import ai.timefold.solver.core.preview.api.domain.metamodel.PlanningVariableMetaModel;
+import ai.timefold.solver.core.preview.api.neighborhood.stream.dataset.sample.Sample;
+import ai.timefold.solver.core.preview.api.neighborhood.test.NeighborhoodTester;
+import ai.timefold.solver.core.testdomain.TestdataEntity;
+import ai.timefold.solver.core.testdomain.TestdataSolution;
+import ai.timefold.solver.core.testdomain.TestdataValue;
+import ai.timefold.solver.core.testdomain.multivar.TestdataMultiVarEntity;
+import ai.timefold.solver.core.testdomain.multivar.TestdataMultiVarSolution;
+import ai.timefold.solver.core.testdomain.multivar.TestdataOtherValue;
+import ai.timefold.solver.core.testdomain.pinned.TestdataPinnedEntity;
+import ai.timefold.solver.core.testdomain.pinned.TestdataPinnedSolution;
+import ai.timefold.solver.core.testdomain.valuerange.entityproviding.TestdataEntityProvidingEntity;
+import ai.timefold.solver.core.testdomain.valuerange.entityproviding.TestdataEntityProvidingSolution;
+import ai.timefold.solver.core.testdomain.valuerange.entityproviding.multivar.TestdataAllowsUnassignedMultiVarEntityProvidingEntity;
+import ai.timefold.solver.core.testdomain.valuerange.entityproviding.multivar.TestdataAllowsUnassignedMultiVarEntityProvidingSolution;
+
+import org.jspecify.annotations.NullMarked;
+import org.junit.jupiter.api.Test;
+
+@NullMarked
+class PillarSwapMoveProviderTest {
+
+    @Test
+    void equalValuesProduceNoMove() {
+        var solution = TestdataSolution.generateSolution(1, 4); // Every entity on the same value.
+        var moveList = NeighborhoodTester
+                .build(new PillarSwapMoveProvider<>(TestdataSolution.buildMetaModel().genuineEntity(TestdataEntity.class)),
+                        TestdataSolution.buildMetaModel())
+                .using(solution)
+                .getMovesAsStream()
+                .limit(50)
+                .toList();
+        // One value means one pillar;
+        // no partner can differ,
+        // so the only key retires and the iterator ends.
+        // This also doubles as the termination test.
+        assertThat(moveList).isEmpty();
+    }
+
+    @Test
+    void atLeastOneDifferingVariableProducesMove() {
+        var solutionMetaModel = TestdataMultiVarSolution.buildMetaModel();
+        var entityMetaModel = solutionMetaModel.genuineEntity(TestdataMultiVarEntity.class);
+        var variableMetaModelList = allVariables(entityMetaModel);
+
+        var value0 = new TestdataValue("v0");
+        var value1 = new TestdataValue("v1");
+        var otherValue0 = new TestdataOtherValue("o0");
+
+        // Pillar A and pillar B agree on primary and tertiary, differing only on secondary.
+        var a1 = new TestdataMultiVarEntity("a1", value0, value0, otherValue0);
+        var a2 = new TestdataMultiVarEntity("a2", value0, value0, otherValue0);
+        var b1 = new TestdataMultiVarEntity("b1", value0, value1, otherValue0);
+        var b2 = new TestdataMultiVarEntity("b2", value0, value1, otherValue0);
+
+        var solution = new TestdataMultiVarSolution("s");
+        solution.setValueList(List.of(value0, value1));
+        solution.setOtherValueList(List.of(otherValue0));
+        solution.setMultiVarEntityList(List.of(a1, a2, b1, b2));
+
+        var pillarA = Sample.of(List.of(a1, a2));
+        var pillarB = Sample.of(List.of(b1, b2));
+
+        var context = NeighborhoodTester.build(new PillarSwapMoveProvider<>(entityMetaModel), solutionMetaModel)
+                .using(solution);
+        // Mirrored pairs are both legal and both kept, as SwapMoveProvider keeps them.
+        context.producesAllOf(
+                Moves.pillarSwap(variableMetaModelList, pillarA, pillarB),
+                Moves.pillarSwap(variableMetaModelList, pillarB, pillarA));
+    }
+
+    @Test
+    void drawsAfterAPillarChangeOfThePreviousStep() {
+        var solutionMetaModel = TestdataEntityProvidingSolution.buildMetaModel();
+        var entityMetaModel = solutionMetaModel.genuineEntity(TestdataEntityProvidingEntity.class);
+        var valueList = new ArrayList<TestdataValue>();
+        var entityList = new ArrayList<TestdataEntityProvidingEntity>();
+        for (var i = 0; i < 10; i++) {
+            valueList.add(new TestdataValue("v" + i));
+        }
+        // Narrow ranges: fewer entities accept a value than there are pillars, so the right pillar is looked up by key.
+        for (var i = 0; i < 10; i++) {
+            var entity = new TestdataEntityProvidingEntity("e" + i,
+                    List.of(valueList.get((i + 9) % 10), valueList.get(i), valueList.get((i + 1) % 10)));
+            entity.setValue(valueList.get(i));
+            entityList.add(entity);
+        }
+        var solution = new TestdataEntityProvidingSolution("s");
+        solution.setEntityList(entityList);
+        var context = NeighborhoodTester.build(new PillarSwapMoveProvider<>(entityMetaModel), solutionMetaModel)
+                .using(solution);
+        // Removes the pillar of v0 from the dataset, which leaves a gap there.
+        context.getMoveTestContext()
+                .execute(
+                        Moves.change(entityMetaModel.<TestdataValue> basicVariable(), entityList.getFirst(), valueList.get(1)));
+
+        assertThat(context.getMovesAsStream().limit(1_000).toList()).hasSize(1_000);
+        // Neighbors accept each other's values, so these single-entity pillars swap; none may be lost to a moved slot.
+        var variableMetaModelList = allVariables(entityMetaModel);
+        context.producesAllOf(
+                Moves.pillarSwap(variableMetaModelList, Sample.of(List.of(entityList.get(2))),
+                        Sample.of(List.of(entityList.get(3)))),
+                Moves.pillarSwap(variableMetaModelList, Sample.of(List.of(entityList.get(3))),
+                        Sample.of(List.of(entityList.get(2)))),
+                Moves.pillarSwap(variableMetaModelList, Sample.of(List.of(entityList.get(8))),
+                        Sample.of(List.of(entityList.get(9)))),
+                Moves.pillarSwap(variableMetaModelList, Sample.of(List.of(entityList.get(9))),
+                        Sample.of(List.of(entityList.get(8)))));
+    }
+
+    @Test
+    void uninitializedPillarNeverGivesNullToAVariableWhichDoesNotAllowIt() {
+        var solutionMetaModel = TestdataSolution.buildMetaModel();
+        var entityMetaModel = solutionMetaModel.genuineEntity(TestdataEntity.class);
+        var variableMetaModelList = allVariables(entityMetaModel);
+        var solution = TestdataSolution.generateSolution(2, 6);
+        var entityList = solution.getEntityList();
+        var valueList = solution.getValueList();
+        entityList.get(0).setValue(null);
+        entityList.get(1).setValue(null);
+        entityList.get(2).setValue(valueList.get(0));
+        for (var i = 3; i < 6; i++) {
+            entityList.get(i).setValue(valueList.get(1));
+        }
+        var uninitializedPillar = Sample.of(List.copyOf(entityList.subList(0, 2)));
+        var pillarA = Sample.of(List.of(entityList.get(2)));
+        var pillarB = Sample.of(List.copyOf(entityList.subList(3, 6)));
+
+        var context = NeighborhoodTester.build(new PillarSwapMoveProvider<>(entityMetaModel), solutionMetaModel)
+                .using(solution);
+        context.producesAllOf(Moves.pillarSwap(variableMetaModelList, pillarA, pillarB));
+        context.producesNoneOf(
+                Moves.pillarSwap(variableMetaModelList, uninitializedPillar, pillarA),
+                Moves.pillarSwap(variableMetaModelList, pillarA, uninitializedPillar),
+                Moves.pillarSwap(variableMetaModelList, uninitializedPillar, pillarB),
+                Moves.pillarSwap(variableMetaModelList, pillarB, uninitializedPillar));
+    }
+
+    @Test
+    void outOfRangeCrossValueRejectsWholePair() {
+        var solutionMetaModel = TestdataEntityProvidingSolution.buildMetaModel();
+        var entityMetaModel = solutionMetaModel.genuineEntity(TestdataEntityProvidingEntity.class);
+        var variableMetaModelList = allVariables(entityMetaModel);
+
+        var value1 = new TestdataValue("v1");
+        var value2 = new TestdataValue("v2");
+
+        // Pillar A: both members accept either value.
+        var a1 = new TestdataEntityProvidingEntity("a1", List.of(value1, value2));
+        a1.setValue(value1);
+        var a2 = new TestdataEntityProvidingEntity("a2", List.of(value1, value2));
+        a2.setValue(value1);
+        // Pillar B: both members are restricted to value2 only,
+        // so accepting value1 (pillar A's current value) is out of range for every member.
+        var b1 = new TestdataEntityProvidingEntity("b1", List.of(value2));
+        b1.setValue(value2);
+        var b2 = new TestdataEntityProvidingEntity("b2", List.of(value2));
+        b2.setValue(value2);
+
+        var solution = new TestdataEntityProvidingSolution("s");
+        solution.setEntityList(List.of(a1, a2, b1, b2));
+
+        var pillarA = Sample.of(List.of(a1, a2));
+        var pillarB = Sample.of(List.of(b1, b2));
+
+        var context = NeighborhoodTester.build(new PillarSwapMoveProvider<>(entityMetaModel), solutionMetaModel)
+                .using(solution);
+        // Pillar A could accept value2,
+        // but pillar B cannot accept value1:
+        // the whole pair is rejected, in either direction.
+        context.producesNoneOf(
+                Moves.pillarSwap(variableMetaModelList, pillarA, pillarB),
+                Moves.pillarSwap(variableMetaModelList, pillarB, pillarA));
+    }
+
+    @Test
+    void mixedLegalityAcrossVariablesRejectsWholePair() {
+        var solutionMetaModel = TestdataAllowsUnassignedMultiVarEntityProvidingSolution.buildMetaModel();
+        var entityMetaModel = solutionMetaModel.genuineEntity(TestdataAllowsUnassignedMultiVarEntityProvidingEntity.class);
+        var variableMetaModelList = allVariables(entityMetaModel);
+
+        var v1 = new TestdataValue("v1");
+        var v3 = new TestdataValue("v3");
+        var v4 = new TestdataValue("v4");
+
+        // Pillar A and pillar B differ on both "value" and "secondValue".
+        // The "value" swap is legal in both directions,
+        // but the "secondValue" swap is not:
+        // pillar A's secondValueRange does not contain pillar B's v3.
+        // One legal variable is not enough to save the pair;
+        // the whole swap is rejected.
+        var a1 = new TestdataAllowsUnassignedMultiVarEntityProvidingEntity("a1", List.of(v1, v4), List.of(v1, v4));
+        a1.setValue(v1);
+        a1.setSecondValue(v1);
+        var b1 = new TestdataAllowsUnassignedMultiVarEntityProvidingEntity("b1", List.of(v1, v4), List.of(v1, v3, v4));
+        b1.setValue(v4);
+        b1.setSecondValue(v3);
+
+        // The third variable is solution-scoped
+        // and both entities leave it null,
+        // so it never differs and never decides the outcome.
+        var solution = new TestdataAllowsUnassignedMultiVarEntityProvidingSolution("s", List.of(v1));
+        solution.setEntityList(List.of(a1, b1));
+
+        var pillarA = Sample.of(List.of(a1));
+        var pillarB = Sample.of(List.of(b1));
+
+        var context = NeighborhoodTester.build(new PillarSwapMoveProvider<>(entityMetaModel), solutionMetaModel)
+                .using(solution);
+        context.producesNoneOf(
+                Moves.pillarSwap(variableMetaModelList, pillarA, pillarB),
+                Moves.pillarSwap(variableMetaModelList, pillarB, pillarA));
+    }
+
+    @Test
+    void pinnedEntityNeverParticipatesInSwap() {
+        var solutionMetaModel = TestdataPinnedSolution.buildMetaModel();
+        var entityMetaModel = solutionMetaModel.genuineEntity(TestdataPinnedEntity.class);
+
+        var v0 = new TestdataValue("v0");
+        var v1 = new TestdataValue("v1");
+        // pinnedEntity shares v0 with free1, forming what would be pillar A;
+        // forEach(..., false) excludes pinned entities from the entity source,
+        // so it must never appear in a swap.
+        var pinnedEntity = new TestdataPinnedEntity("pinned", v0, true);
+        var free1 = new TestdataPinnedEntity("free1", v0, false);
+        var free2 = new TestdataPinnedEntity("free2", v1, false);
+        var free3 = new TestdataPinnedEntity("free3", v1, false);
+
+        var solution = new TestdataPinnedSolution("s");
+        solution.setValueList(List.of(v0, v1));
+        solution.setEntityList(List.of(pinnedEntity, free1, free2, free3));
+
+        var context = NeighborhoodTester.build(new PillarSwapMoveProvider<>(entityMetaModel), solutionMetaModel)
+                .using(solution);
+
+        var moves = context.getMovesAsStream(move -> (PillarSwapMove<TestdataPinnedSolution, TestdataPinnedEntity>) move)
+                .limit(100)
+                .toList();
+        assertThat(moves)
+                .isNotEmpty()
+                .flatExtracting(PillarSwapMove::getPlanningEntities)
+                .doesNotContain(pinnedEntity);
+    }
+
+    @Test
+    void threeAgainstFiveSwapsEveryMember() {
+        var solutionMetaModel = TestdataSolution.buildMetaModel();
+        var entityMetaModel = solutionMetaModel.genuineEntity(TestdataEntity.class);
+        var variableMetaModelList = allVariables(entityMetaModel);
+
+        var solution = TestdataSolution.generateSolution(2, 8);
+        var entityList = solution.getEntityList();
+        var valueList = solution.getValueList();
+        // First three entities share value0 (pillar A, size 3);
+        // the remaining five share value1 (pillar B, size 5).
+        // The legal-swap fraction stays high:
+        // the only two keys in the pool both produce a legal swap in either direction.
+        for (var i = 0; i < 3; i++) {
+            entityList.get(i).setValue(valueList.getFirst());
+        }
+        for (var i = 3; i < 8; i++) {
+            entityList.get(i).setValue(valueList.get(1));
+        }
+        var pillarA = Sample.of(List.copyOf(entityList.subList(0, 3)));
+        var pillarB = Sample.of(List.copyOf(entityList.subList(3, 8)));
+
+        var context = NeighborhoodTester.build(new PillarSwapMoveProvider<>(entityMetaModel), solutionMetaModel)
+                .using(solution);
+        context.producesAllOf(
+                Moves.pillarSwap(variableMetaModelList, pillarA, pillarB),
+                Moves.pillarSwap(variableMetaModelList, pillarB, pillarA));
+    }
+
+    @Test
+    void sizeOnePillarsAreGenerated() {
+        var solutionMetaModel = TestdataSolution.buildMetaModel();
+        var entityMetaModel = solutionMetaModel.genuineEntity(TestdataEntity.class);
+
+        // Every entity gets its own distinct value, so every pillar has exactly one member.
+        var solution = TestdataSolution.generateSolution(4, 4);
+
+        var context = NeighborhoodTester.build(new PillarSwapMoveProvider<>(entityMetaModel), solutionMetaModel)
+                .using(solution);
+        var moveList = context.getMovesAsStream(move -> (PillarSwapMove<TestdataSolution, TestdataEntity>) move)
+                .limit(100)
+                .toList();
+        assertThat(moveList).isNotEmpty();
+        // Unlike PillarChangeMoveProvider, size-1 pillars are legal on both sides of a swap.
+        assertThat(moveList).allSatisfy(move -> assertThat(move.getPlanningEntities()).hasSize(2));
+    }
+
+    @Test
+    void excludedVariableIsIgnoredForKeyAndSwap() {
+        var solutionMetaModel = TestdataMultiVarSolution.buildMetaModel();
+        var entityMetaModel = solutionMetaModel.genuineEntity(TestdataMultiVarEntity.class);
+        var allowedVariableMetaModelList = allVariables(entityMetaModel).stream()
+                .filter(v -> !v.name().contains("secondary"))
+                .toList();
+
+        var value0 = new TestdataValue("v0");
+        var value1 = new TestdataValue("v1");
+        var otherValue0 = new TestdataOtherValue("o0");
+
+        // Same setup as atLeastOneDifferingVariableProducesMove:
+        // with the full variable list, A and B are distinct pillars (they differ on secondary).
+        // Excluding secondary from the key merges them into one pillar (all four share primary and tertiary),
+        // leaving no second distinct key to swap with.
+        var a1 = new TestdataMultiVarEntity("a1", value0, value0, otherValue0);
+        var a2 = new TestdataMultiVarEntity("a2", value0, value0, otherValue0);
+        var b1 = new TestdataMultiVarEntity("b1", value0, value1, otherValue0);
+        var b2 = new TestdataMultiVarEntity("b2", value0, value1, otherValue0);
+
+        var solution = new TestdataMultiVarSolution("s");
+        solution.setValueList(List.of(value0, value1));
+        solution.setOtherValueList(List.of(otherValue0));
+        solution.setMultiVarEntityList(List.of(a1, a2, b1, b2));
+
+        var moveList = NeighborhoodTester
+                .build(new PillarSwapMoveProvider<>(allowedVariableMetaModelList), solutionMetaModel)
+                .using(solution)
+                .getMovesAsStream()
+                .limit(50)
+                .toList();
+        assertThat(moveList).isEmpty();
+    }
+
+    @Test
+    void singleVariableConstructorMatchesOneElementList() {
+        var solutionMetaModel = TestdataSolution.buildMetaModel();
+        var variableMetaModel = solutionMetaModel.genuineEntity(TestdataEntity.class).basicVariable();
+
+        var solution = TestdataSolution.generateSolution(2, 4);
+        var entityList = solution.getEntityList();
+        var valueList = solution.getValueList();
+        entityList.get(0).setValue(valueList.get(0));
+        entityList.get(1).setValue(valueList.get(0));
+        entityList.get(2).setValue(valueList.get(1));
+        entityList.get(3).setValue(valueList.get(1));
+        var pillarA = Sample.of(List.of(entityList.get(0), entityList.get(1)));
+        var pillarB = Sample.of(List.of(entityList.get(2), entityList.get(3)));
+
+        var expectedMoveAtoB = Moves.pillarSwap(variableMetaModel, pillarA, pillarB);
+        var expectedMoveBtoA = Moves.pillarSwap(variableMetaModel, pillarB, pillarA);
+
+        NeighborhoodTester.build(new PillarSwapMoveProvider<>(variableMetaModel), solutionMetaModel)
+                .using(solution)
+                .producesAllOf(expectedMoveAtoB, expectedMoveBtoA);
+        NeighborhoodTester.build(new PillarSwapMoveProvider<>(List.of(variableMetaModel)), solutionMetaModel)
+                .using(solution)
+                .producesAllOf(expectedMoveAtoB, expectedMoveBtoA);
+    }
+
+    @Test
+    void emptyListConstructorThrows() {
+        assertThatThrownBy(() -> new PillarSwapMoveProvider<TestdataSolution, TestdataEntity>(List.of()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("is empty");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <Solution_, Entity_> List<PlanningVariableMetaModel<Solution_, Entity_, Object>> allVariables(
+            PlanningEntityMetaModel<Solution_, Entity_> entityMetaModel) {
+        return entityMetaModel.variables().stream()
+                .map(v -> (PlanningVariableMetaModel<Solution_, Entity_, Object>) v)
+                .toList();
+    }
+
+    @Test
+    void id() {
+        var entityMetaModel = TestdataMultiVarSolution.buildMetaModel().genuineEntity(TestdataMultiVarEntity.class);
+        List<PlanningVariableMetaModel<TestdataMultiVarSolution, TestdataMultiVarEntity, ?>> variableList =
+                List.of(entityMetaModel.basicVariable("secondaryValue"), entityMetaModel.basicVariable("primaryValue"));
+        assertThat(new PillarSwapMoveProvider<>(variableList).getId())
+                .isEqualTo("PillarSwapMoveProvider(TestdataMultiVarEntity.primaryValue,secondaryValue)");
+    }
+
+    @Test
+    void everyValidPillarIsDrawnEquallyOftenRegardlessOfItsSize() {
+        var solutionMetaModel = TestdataEntityProvidingSolution.buildMetaModel();
+        var variableMetaModel = solutionMetaModel.genuineEntity(TestdataEntityProvidingEntity.class).basicVariable();
+        var a = new TestdataValue("a");
+        var b = new TestdataValue("b");
+        var c = new TestdataValue("c");
+        var range = List.of(a, b, c);
+        var entityList = new ArrayList<TestdataEntityProvidingEntity>();
+        var single = new TestdataEntityProvidingEntity("single", range, a);
+        entityList.add(single);
+        for (var i = 0; i < 5; i++) {
+            entityList.add(new TestdataEntityProvidingEntity("large" + i, range, b));
+        }
+        var small = new TestdataEntityProvidingEntity("small", range, c);
+        entityList.add(small);
+        // Pillars which cannot take "a"; they make the pool of all pillars larger than the candidate list,
+        // so that the right pillar is drawn through the candidate list and the size correction applies.
+        for (var i = 0; i < 10; i++) {
+            var other = new TestdataValue("other" + i);
+            entityList.add(new TestdataEntityProvidingEntity("other" + i, List.of(other), other));
+        }
+        var solution = new TestdataEntityProvidingSolution("s");
+        solution.setEntityList(entityList);
+
+        // With "single" on the left, the 5-member pillar has 5 members in the candidate list and the 1-member pillar 1;
+        // both are valid partners, so both must be chosen equally often.
+        var context = NeighborhoodTester.build(new PillarSwapMoveProvider<>(variableMetaModel), solutionMetaModel)
+                .using(solution);
+        var rightSizes = context
+                .getMovesAsStream(move -> (PillarSwapMove<TestdataEntityProvidingSolution, TestdataEntityProvidingEntity>) move)
+                .limit(20_000)
+                .filter(move -> move.getLeftPillar().contains(single))
+                .map(move -> move.getRightPillar().size())
+                .toList();
+        var largeCount = rightSizes.stream().filter(size -> size == 5).count();
+        assertThat(rightSizes).hasSizeGreaterThan(500);
+        assertThat((double) largeCount / rightSizes.size()).isBetween(0.4, 0.6);
+    }
+
+}

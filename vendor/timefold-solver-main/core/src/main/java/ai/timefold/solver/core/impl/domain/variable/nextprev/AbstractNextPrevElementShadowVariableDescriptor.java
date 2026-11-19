@@ -1,0 +1,89 @@
+package ai.timefold.solver.core.impl.domain.variable.nextprev;
+
+import java.util.List;
+
+import ai.timefold.solver.core.api.domain.variable.PlanningListVariable;
+import ai.timefold.solver.core.impl.domain.common.accessor.MemberAccessor;
+import ai.timefold.solver.core.impl.domain.entity.descriptor.EntityDescriptor;
+import ai.timefold.solver.core.impl.domain.policy.DescriptorPolicy;
+import ai.timefold.solver.core.impl.domain.variable.descriptor.ListVariableDescriptor;
+import ai.timefold.solver.core.impl.domain.variable.descriptor.ShadowVariableDescriptor;
+import ai.timefold.solver.core.impl.domain.variable.descriptor.VariableDescriptor;
+
+abstract class AbstractNextPrevElementShadowVariableDescriptor<Solution_> extends ShadowVariableDescriptor<Solution_> {
+
+    protected ListVariableDescriptor<Solution_> sourceVariableDescriptor;
+
+    protected AbstractNextPrevElementShadowVariableDescriptor(int ordinal, EntityDescriptor<Solution_> entityDescriptor,
+            MemberAccessor variableMemberAccessor) {
+        super(ordinal, entityDescriptor, variableMemberAccessor);
+    }
+
+    abstract String getSourceVariableName();
+
+    abstract String getAnnotationName();
+
+    @Override
+    public void processAnnotations(DescriptorPolicy descriptorPolicy) {
+        // Do nothing
+    }
+
+    @Override
+    public void linkVariableDescriptors(DescriptorPolicy descriptorPolicy) {
+        linkShadowSources(descriptorPolicy);
+    }
+
+    private void linkShadowSources(DescriptorPolicy descriptorPolicy) {
+        String sourceVariableName = getSourceVariableName();
+        List<EntityDescriptor<Solution_>> entitiesWithSourceVariable =
+                entityDescriptor.getSolutionDescriptor().getEntityDescriptors().stream()
+                        .filter(entityDescriptor -> entityDescriptor.hasVariableDescriptor(sourceVariableName)).toList();
+        if (entitiesWithSourceVariable.isEmpty()) {
+            throw new IllegalArgumentException("""
+                    The entityClass (%s) has a @%s-annotated property (%s) with sourceVariableName (%s) \
+                    which is not a valid planning variable on any of the entity classes (%s)."""
+                    .formatted(entityDescriptor.getEntityClass().getCanonicalName(), getAnnotationName(),
+                            variableMemberAccessor.getName(), sourceVariableName,
+                            entityDescriptor.getSolutionDescriptor().getEntityDescriptors()));
+        }
+        if (entitiesWithSourceVariable.size() > 1) {
+            throw new IllegalArgumentException(
+                    """
+                            The entityClass (%s) has a @%s-annotated property (%s) with sourceVariableName (%s) which is not a unique planning variable.
+                            A planning variable with the name (%s) exists on multiple entity classes (%s)."""
+                            .formatted(entityDescriptor.getEntityClass().getCanonicalName(), getAnnotationName(),
+                                    variableMemberAccessor.getName(), sourceVariableName, sourceVariableName,
+                                    entitiesWithSourceVariable));
+        }
+        VariableDescriptor<Solution_> variableDescriptor =
+                entitiesWithSourceVariable.getFirst().getVariableDescriptor(sourceVariableName);
+        if (variableDescriptor == null) {
+            throw new IllegalStateException("""
+                    Impossible state: variableDescriptor for sourceVariable is null but previous checks indicate that \
+                    the entityClass (%s) has a planning variable with sourceVariableName (%s)."""
+                    .formatted(entitiesWithSourceVariable.getFirst().getEntityClass().getCanonicalName(), sourceVariableName));
+        }
+        if (!(variableDescriptor instanceof ListVariableDescriptor)) {
+            throw new IllegalArgumentException(
+                    "The entityClass (%s) has a @%s-annotated property (%s) with sourceVariableName (%s) which is not a %s."
+                            .formatted(entityDescriptor.getEntityClass().getCanonicalName(), getAnnotationName(),
+                                    variableMemberAccessor.getName(), sourceVariableName,
+                                    PlanningListVariable.class.getSimpleName()));
+        }
+        sourceVariableDescriptor = (ListVariableDescriptor<Solution_>) variableDescriptor;
+        if (!variableMemberAccessor.getType().equals(sourceVariableDescriptor.getElementType())) {
+            throw new IllegalArgumentException("""
+                    The entityClass (%s) has a @%s-annotated property (%s) with sourceVariableName (%s) of type (%s) \
+                    which is not the type of elements (%s) of the source list variable (%s)."""
+                    .formatted(entityDescriptor.getEntityClass().getCanonicalName(), getAnnotationName(),
+                            variableMemberAccessor.getName(), sourceVariableName, variableMemberAccessor.getType(),
+                            sourceVariableDescriptor.getElementType(), sourceVariableDescriptor));
+        }
+    }
+
+    @Override
+    public VariableDescriptor<Solution_> getSourceVariableDescriptor() {
+        return sourceVariableDescriptor;
+    }
+
+}

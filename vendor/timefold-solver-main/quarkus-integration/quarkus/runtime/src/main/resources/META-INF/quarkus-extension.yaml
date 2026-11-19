@@ -1,0 +1,22 @@
+---
+name: "Timefold Solver"
+metadata:
+  keywords:
+    - "timefold"
+    - "constraint"
+    - "solver"
+    - "timetabling"
+    - "planning"
+    - "scheduling"
+    - "rostering"
+    - "routing"
+    - "ai"
+  guide: "https://docs.timefold.ai/timefold-solver/latest/quickstart/quarkus/quarkus-quickstart"
+  icon-url: "https://timefold.ai/uploads/images/Brand-Assets/Icon.svg"
+  categories:
+    - "ai"
+    - "automation"
+  status: "stable"
+  config:
+    - "quarkus.timefold."
+scm-url: "https://github.com/TimefoldAI/timefold-solver"

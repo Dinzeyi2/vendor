@@ -1,0 +1,357 @@
+.. _c_install:
+
+C / C++
+=======
+
+First clone the SCS repo from GitHub
+
+.. code:: bash
+
+  git clone https://github.com/cvxgrp/scs.git
+
+CMake
+^^^^^
+
+Thanks to the `CMake <https://cmake.org/cmake/help/latest/>`__ buildsystem SCS
+can be easily compiled and linked to other CMake projects. To use the cmake
+build system please run the following commands:
+
+.. code:: bash
+
+  cd scs
+  mkdir build
+  cd build
+  cmake -DCMAKE_INSTALL_PREFIX:PATH=<custom-folder> ../
+  make
+  make install
+
+You may also want to compile the tests. In this case when you configure the
+project, please call the following command
+
+.. code:: bash
+
+  cmake -DCMAKE_INSTALL_PREFIX:PATH=<custom-folder> -DBUILD_TESTING=ON ../
+  make
+  ctest
+
+Some :ref:`compile flags <compile_flags>` can be overridden using the
+command line, for example we can compile the library (and headers) to use 64 bit
+integers using:
+
+.. code:: bash
+
+  cmake -DCMAKE_INSTALL_PREFIX:PATH=<custom-folder> -DDLONG=ON ../
+  make
+
+By default the build-system will compile the library as shared. If you want to
+compile it as static, please call the following command when you configure the
+project
+
+.. code:: bash
+
+  cmake -DCMAKE_INSTALL_PREFIX:PATH=<custom-folder> -DBUILD_SHARED_LIBS=OFF ../
+  make
+
+The CMake build-system exports two CMake targets called :code:`scs::scsdir` and
+:code:`scs::scsindir` as well as a header file :code:`scs.h` that defines the
+API (installed with the two headers it includes, :code:`scs_types.h` and
+:code:`aa_stats.h`). When LAPACK is available (the default), it also exports
+:code:`scs::scsdense` for the :ref:`dense direct <dense>` solver.
+
+MKL
+"""
+
+If `MKL
+<https://www.intel.com/content/www/us/en/develop/documentation/get-started-with-mkl-for-dpcpp/top.html>`_
+is installed in your system and the :code:`MKLROOT` environment variable is
+set, then additionally CMake will build and install the :ref:`MKL Pardiso
+<mkl>` linear solver with target :code:`scs::scsmkl`. CMake finds MKL through
+the CMake package that oneMKL installs (:code:`MKLConfig.cmake`, oneMKL 2021.3
+or later), which it looks for under :code:`MKLROOT`. Configuration stops with
+an error if that package is not found. SCS links the single dynamic library
+(:code:`mkl_rt`) through the :code:`MKL::MKL` target of that package, so there
+is no MKL link line to edit in the CMake build.
+
+Setting :code:`MKLROOT` also changes the BLAS/LAPACK of the other SCS
+libraries. When :code:`USE_LAPACK` is on (the default), CMake then looks for
+MKL as the BLAS/LAPACK library (it sets :code:`BLA_VENDOR` to
+:code:`Intel10_64lp`, or to :code:`Intel10_64ilp` with :code:`BLAS64=ON`), and
+every SCS library that links the BLAS/LAPACK found by CMake links against it,
+:code:`scs::scsdir`, :code:`scs::scsindir` and :code:`scs::scsdense` among
+them. To keep another BLAS/LAPACK for those libraries, pass
+:code:`BLA_VENDOR` on the command line, e.g. :code:`-DBLA_VENDOR=OpenBLAS`.
+
+The :code:`BLAS64` compile flag is a general SCS flag for ILP64 BLAS/LAPACK
+libraries. When using the MKL Pardiso backend specifically, :code:`BLAS64=1`
+must be paired with :code:`DLONG=1` so that :code:`pardiso_64` matches the
+64-bit BLAS interface. In the CMake build, :code:`BLAS64=ON` also requires
+that CMake can find an ILP64 BLAS/LAPACK implementation; if autodetection
+needs help, set :code:`BLA_VENDOR` explicitly.
+
+
+GPU
+"""
+
+If you have a GPU and the CUDA toolkit installed, you can build the
+:ref:`GPU indirect <gpu_indirect>` solver:
+
+.. code:: bash
+
+  cmake -DCMAKE_INSTALL_PREFIX:PATH=<custom-folder> -DUSE_GPU=ON ../
+  make
+  make install
+
+This builds and installs the GPU solver with target
+:code:`scs::scsgpuindir`. CMake locates the CUDA runtime, cuBLAS and cuSPARSE
+with `FindCUDAToolkit
+<https://cmake.org/cmake/help/latest/module/FindCUDAToolkit.html>`_, which
+honors :code:`CUDAToolkit_ROOT` if the toolkit lives somewhere unusual. Build
+it with 32 bit integers, that is with :code:`DLONG` left off (the default).
+The solver passes some of its integers to cuBLAS and cuSPARSE routines that
+only take 32 bit ones (:code:`cublasIdamax` and :code:`cusparseCsr2cscEx2`),
+and CMake does not check this: with :code:`-DDLONG=ON` the build stops with an
+error under compilers that reject the mismatched pointer types (GCC 14 and
+later), and under compilers that only warn about them (GCC 13, for instance)
+it builds a solver that fails its tests. The transpose of :code:`A` is
+stored in GPU memory by default; configure with
+:code:`-DGPU_TRANSPOSE_MAT=OFF` to save that memory at the cost of slower
+products with :code:`A`.
+
+If the tests are enabled as well (:code:`-DBUILD_TESTING=ON`), the test
+program :code:`run_tests_gpu_indirect` is built and registered with CTest. It
+builds wherever the CUDA toolkit is installed, but it needs a GPU to run. On a
+machine without one (a packaging machine, for instance) leave it out with
+
+.. code:: bash
+
+  ctest -E gpu
+
+Note that the GPU is typically only faster than the CPU for very large
+problems, and that the indirect solver is a legacy backend: the cuDSS direct
+solver described below is the recommended GPU backend and should be preferred
+whenever cuDSS is available. See :ref:`gpu_reproducibility` for why two runs
+on a GPU can differ.
+
+cuDSS
+"""""
+
+If you have a GPU and CUDA toolkit installed, along with the
+`cuDSS <https://developer.nvidia.com/cudss>`_ library, you can compile SCS
+with cuDSS support using CMake. CMake locates the CUDA toolkit with
+FindCUDAToolkit, as for the GPU indirect solver above, and cuDSS through the
+CMake package that cuDSS itself installs (:code:`find_package(cudss)`), so
+nothing needs to be set when both are in standard locations and that cuDSS
+was built for your CUDA major version (see below). If cuDSS is
+somewhere else, pass its install prefix with
+:code:`-DCMAKE_PREFIX_PATH=<cudss-prefix>`, or the folder that holds its CMake
+package files (:code:`cudss-config.cmake`) with :code:`-Dcudss_DIR=<folder>`.
+The :code:`CUDSS_PATH` variable is only used by the Makefile build and has no
+effect here. cuDSS is built for one CUDA major version, so use the cuDSS build
+that matches your CUDA toolkit. NVIDIA's :code:`cudss` apt package installs
+the builds for CUDA 12 and CUDA 13 and makes the CUDA 13 one the default; with
+CUDA 12, point CMake at the CUDA 12 build. Then configure with cuDSS enabled:
+
+.. code:: bash
+
+  cmake -DCMAKE_INSTALL_PREFIX:PATH=<custom-folder> -DUSE_CUDSS=ON -DDLONG=OFF ../
+  make
+  make install
+
+This builds and installs the cuDSS linear solver with target
+:code:`scs::scscudss`. The CMake build of the cuDSS solver only accepts 32 bit
+integers: :code:`-DDLONG=OFF` (the default) is mandatory, and configuring with
+:code:`-DDLONG=ON` is an error.
+
+With :code:`-DBUILD_TESTING=ON` the test program :code:`run_tests_cudss` is
+registered with CTest in the same way as the GPU indirect one, and it also
+needs a GPU to run. On a machine without one leave it out with
+:code:`ctest -E cudss` (or :code:`ctest -E 'gpu|cudss'` if both GPU solvers
+were built).
+
+Importing
+"""""""""
+The libraries can be imported using the find_package CMake command and used
+by calling target_link_libraries as in the following example. SCS needs CMake
+3.22 or newer to build, and a static SCS package
+(:code:`-DBUILD_SHARED_LIBS=OFF`) cannot be imported by an older CMake. Link
+the target for the linear solver you want: :code:`scs::scsdir` and
+:code:`scs::scsindir` are always installed, the others only when SCS was
+built with that solver. If SCS was built as a static library
+(:code:`-DBUILD_SHARED_LIBS=OFF`) with the GPU indirect solver or cuDSS,
+:code:`find_package(scs)` also looks for the CUDA toolkit (and for cuDSS, if
+SCS was built with it), so give the consuming project the same
+:code:`CUDAToolkit_ROOT`, :code:`CMAKE_PREFIX_PATH` or :code:`cudss_DIR` that
+SCS was configured with.
+
+.. code:: bash
+
+  cmake_minimum_required(VERSION 3.22)
+  project(myproject)
+  find_package(scs REQUIRED)
+  add_executable(example example.cpp)
+
+  # To use the direct method
+  target_link_libraries(example scs::scsdir)
+
+  # To use the indirect method
+  target_link_libraries(example scs::scsindir)
+
+  # To use the MKL Pardiso direct method
+  target_link_libraries(example scs::scsmkl)
+
+  # To use the dense direct method (requires LAPACK)
+  target_link_libraries(example scs::scsdense)
+
+  # To use the cuDSS direct method
+  target_link_libraries(example scs::scscudss)
+
+  # To use the GPU indirect method (requires -DUSE_GPU=ON)
+  target_link_libraries(example scs::scsgpuindir)
+
+  # To use the Apple Accelerate direct method (macOS only, requires
+  # -DUSE_APPLE_ACCELERATE=ON)
+  target_link_libraries(example scs::scsaccel)
+
+Makefile
+^^^^^^^^
+Alternatively you can use the Makefile and manage the libraries and header
+files yourself.  The public header files are :code:`scs.h`,
+:code:`scs_types.h` and :code:`aa_stats.h`.  Your code only needs to include
+:code:`scs.h`, but :code:`scs.h` includes the other two, so all three must be
+on the include path.
+
+.. code:: bash
+
+  cd scs
+  make
+
+
+To compile and run the tests execute
+
+.. code:: bash
+
+  make test
+  out/run_tests_direct
+  out/run_tests_indirect
+
+If make completes successfully, it will produce two static library files,
+:code:`libscsdir.a`, :code:`libscsindir.a`, and two dynamic library files
+:code:`libscsdir.ext`, :code:`libscsindir.ext` (where :code:`.ext` extension is
+platform dependent) in the :code:`out` folder.
+
+If `MKL
+<https://www.intel.com/content/www/us/en/develop/documentation/get-started-with-mkl-for-dpcpp/top.html>`_
+is installed in your system and the :code:`MKLROOT` environment variable is set,
+then you can compile and test the :ref:`MKL Pardiso <mkl>` version of SCS using:
+
+.. code:: bash
+
+  make mkl
+  out/run_tests_mkl
+
+This will produce static library :code:`libscsmkl.a` and dynamic library
+:code:`libscsmkl.ext` (again :code:`.ext` is platform dependent) in the
+:code:`out` folder.  The MKL link line (:code:`MKLFLAGS` in :code:`scs.mk`) is
+written for Linux with GCC and may need to be `modified
+<https://www.intel.com/content/www/us/en/developer/tools/oneapi/onemkl-link-line-advisor.html>`_
+for your system. It links Intel's OpenMP library (:code:`libiomp5`), which it
+looks for in the :code:`lib` folder of :code:`OMPROOT`. :code:`OMPROOT`
+defaults to :code:`MKLROOT`. If :code:`libiomp5` is somewhere else, as in a
+oneAPI installation, set :code:`OMPROOT`, e.g.
+:code:`make mkl OMPROOT=/opt/intel/oneapi/compiler/latest`.
+
+If you want 64-bit BLAS/LAPACK integers with the MKL Pardiso backend, build
+with both :code:`BLAS64=1` and :code:`DLONG=1`.
+
+To compile and test the :ref:`dense direct <dense>` solver (requires LAPACK):
+
+.. code:: bash
+
+  make dense
+  out/run_tests_dense
+
+This will produce static library :code:`libscsdense.a` and dynamic library
+:code:`libscsdense.ext` (where :code:`.ext` is platform dependent) in the
+:code:`out` folder. The dense solver is best suited for small to medium-sized
+problems.
+
+If you have a GPU and have CUDA installed, you can also execute make gpu to
+compile SCS to run on the GPU which will create additional libraries and demo
+binaries in the out folder corresponding to the GPU version.  Unlike
+:code:`make mkl`, :code:`make dense` and :code:`make cudss`, :code:`make gpu`
+does not build the test program; build it with :code:`make test_gpu`.  The
+Makefile looks for the CUDA toolkit in :code:`/usr/local/cuda`; set
+:code:`CUDA_PATH` if it is somewhere else.  The GPU indirect solver requires
+32 bit integers, which is the default (:code:`DLONG=0`):
+:code:`make gpu DLONG=1` does not compile.  :code:`make install` installs the
+headers and the direct and indirect libraries (:code:`libscsdir` and
+:code:`libscsindir`); :code:`make install_gpu` installs the headers and
+:code:`libscsgpuindir`.  The Makefile has no install target for the other
+libraries, the cuDSS ones included.
+
+.. code:: bash
+
+  make gpu
+  make test_gpu
+  out/run_tests_gpu_indirect
+
+The GPU sources are compiled by the host C compiler rather than by
+:code:`nvcc`, so they include the CUDA headers directly.  This means the
+:code:`crt` headers must be present alongside the runtime: up to CUDA 12 they
+were part of the :code:`cuda_nvcc` component, whereas CUDA 13 moved them into a
+separate :code:`cuda_crt` component.  A partial installation that omits it
+fails with
+
+.. code:: text
+
+  driver_types.h:59:30: fatal error: crt/host_defines.h: No such file or directory
+
+Installing the full CUDA toolkit pulls the component in automatically; only
+builds that pick individual components (distribution packaging, for instance)
+need to request it explicitly.
+
+Finally, to compile and test the :ref:`cuDSS solver <cudss_solver>` you need to
+have CUDA toolkit, the :code:`nvcc` compiler, and `cuDSS
+<https://developer.nvidia.com/cudss>`_ library installed.  Set
+:code:`CUDSS_PATH` to the folder where cuDSS is installed (the one that holds
+its :code:`include` and :code:`lib` folders).  cuDSS is built for one CUDA
+major version, so with CUDA 12 point :code:`CUDSS_PATH` at the CUDA 12 build
+of cuDSS, not at the CUDA 13 one that NVIDIA's :code:`cudss` apt package
+makes the default.  Set :code:`CUDA_PATH` if the CUDA toolkit is not in
+:code:`/usr/local/cuda` (the Makefile compiles the cuDSS source with
+:code:`$(CUDA_PATH)/bin/nvcc`; set :code:`CUCC` to use another :code:`nvcc`),
+and execute
+
+.. code:: bash
+
+  make cudss
+  out/run_tests_cudss
+
+The programs in :code:`out` are linked against the shared CUDA libraries (and
+for cuDSS, :code:`libcudss`) without a run path. If the loader does not find
+them, add their folders, e.g.
+:code:`LD_LIBRARY_PATH=<cudss>/lib:/usr/local/cuda/lib64 out/run_tests_cudss`
+(and :code:`LD_LIBRARY_PATH=/usr/local/cuda/lib64 out/run_tests_gpu_indirect`),
+where :code:`<cudss>` is the folder that :code:`CUDSS_PATH` names, and with the
+folder of :code:`CUDA_PATH` in place of :code:`/usr/local/cuda` if you set it.
+
+The default is 32 bit integers (:code:`DLONG=0`). The Makefile build also
+accepts :code:`make cudss DLONG=1`, in which case SCS passes 64 bit sparse
+matrix indices to cuDSS (see `the docs of cuDSS CSR matrix
+<https://docs.nvidia.com/cuda/cudss/functions.html#cudssmatrixcreatecsr>`_).
+That build passed the test suite on one GPU, an NVIDIA GB10 (aarch64) with
+CUDA 13.0 and cuDSS 1.0.0, in a build without LAPACK, so the SDP tests were
+not run; CI also runs it against a simulated cuDSS. It has not been run
+against older cuDSS releases. The CMake build only accepts 32 bit integers.
+
+To use the libraries in your own source code, compile your code with the linker
+option :code:`-L(PATH_TO_SCS_LIBS)` and :code:`-lscsdir` or :code:`-lscsindir`
+(as needed). The GPU libraries need the CUDA libraries as well: link
+:code:`-lscsgpuindir` with
+:code:`-L<cuda>/lib64 -lcudart -lcublas -lcusparse`, and
+:code:`-lscscudss` with
+:code:`-L<cudss>/lib -lcudss -L<cuda>/lib64 -lcudart`, where :code:`<cuda>`
+and :code:`<cudss>` are the folders that :code:`CUDA_PATH` and
+:code:`CUDSS_PATH` name. The API
+and required data structures are defined in the file :code:`include/scs.h`
+and documented :ref:`here <c_interface>`.

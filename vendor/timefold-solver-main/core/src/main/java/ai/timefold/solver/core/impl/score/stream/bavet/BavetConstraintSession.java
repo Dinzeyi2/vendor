@@ -1,0 +1,58 @@
+package ai.timefold.solver.core.impl.score.stream.bavet;
+
+import java.util.Map;
+
+import ai.timefold.solver.core.api.score.Score;
+import ai.timefold.solver.core.api.score.stream.ConstraintRef;
+import ai.timefold.solver.core.impl.bavet.AbstractSession;
+import ai.timefold.solver.core.impl.bavet.common.PropagationQueue;
+import ai.timefold.solver.core.impl.domain.variable.declarative.ConsistencyTracker;
+import ai.timefold.solver.core.impl.score.constraint.ConstraintMatchPolicy;
+import ai.timefold.solver.core.impl.score.constraint.ConstraintMatchTotal;
+import ai.timefold.solver.core.impl.score.director.stream.BavetConstraintStreamScoreDirectorFactory;
+import ai.timefold.solver.core.impl.score.stream.common.inliner.AbstractScoreInliner;
+
+import org.jspecify.annotations.NullMarked;
+
+/**
+ * The type is public to make it easier for Bavet-specific minimal bug reproducers to be created.
+ * Instances should be created through
+ * {@link BavetConstraintStreamScoreDirectorFactory#newSession(Object, ConsistencyTracker, ConstraintMatchPolicy, boolean)}.
+ *
+ * @see PropagationQueue Description of the tuple propagation mechanism.
+ *
+ * @param <Score_>
+ */
+@NullMarked
+public final class BavetConstraintSession<Score_ extends Score<Score_>>
+        extends AbstractSession<ConstraintStreamsBavetNodeNetwork> {
+
+    private final AbstractScoreInliner<Score_> scoreInliner;
+
+    BavetConstraintSession(AbstractScoreInliner<Score_> scoreInliner) {
+        this(scoreInliner, ConstraintStreamsBavetNodeNetwork.EMPTY);
+    }
+
+    BavetConstraintSession(AbstractScoreInliner<Score_> scoreInliner, ConstraintStreamsBavetNodeNetwork nodeNetwork) {
+        super(nodeNetwork);
+        this.scoreInliner = scoreInliner;
+    }
+
+    public Score_ calculateScore() {
+        settle();
+        return scoreInliner.extractScore();
+    }
+
+    public AbstractScoreInliner<Score_> getScoreInliner() {
+        return scoreInliner;
+    }
+
+    public Map<ConstraintRef, ConstraintMatchTotal<Score_>> getConstraintMatchTotalMap() {
+        return scoreInliner.getConstraintMatchTotalMap();
+    }
+
+    public void summarizeProfileIfPresent() {
+        nodeNetwork.summarizeProfileIfPresent();
+    }
+
+}

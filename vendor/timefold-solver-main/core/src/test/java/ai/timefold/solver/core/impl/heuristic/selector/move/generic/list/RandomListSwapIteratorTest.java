@@ -1,0 +1,51 @@
+package ai.timefold.solver.core.impl.heuristic.selector.move.generic.list;
+
+import static ai.timefold.solver.core.testdomain.list.TestdataListUtils.getListVariableDescriptor;
+import static ai.timefold.solver.core.testdomain.list.TestdataListUtils.mockIterableValueSelector;
+import static ai.timefold.solver.core.testutil.PlannerAssert.assertCodesOfIterator;
+import static ai.timefold.solver.core.testutil.PlannerTestUtils.mockScoreDirector;
+
+import java.util.List;
+
+import ai.timefold.solver.core.api.score.SimpleScore;
+import ai.timefold.solver.core.api.solver.SolutionManager;
+import ai.timefold.solver.core.impl.domain.variable.descriptor.ListVariableDescriptor;
+import ai.timefold.solver.core.impl.score.director.InnerScoreDirector;
+import ai.timefold.solver.core.testdomain.list.TestdataListEntity;
+import ai.timefold.solver.core.testdomain.list.TestdataListSolution;
+import ai.timefold.solver.core.testdomain.list.TestdataListValue;
+
+import org.junit.jupiter.api.Test;
+
+class RandomListSwapIteratorTest {
+
+    @Test
+    void iterator() {
+        TestdataListValue v1 = new TestdataListValue("1");
+        TestdataListValue v2 = new TestdataListValue("2");
+        TestdataListValue v3 = new TestdataListValue("3");
+        var e1 = new TestdataListEntity("A", v1, v2);
+        var e2 = new TestdataListEntity("B");
+        var e3 = new TestdataListEntity("C", v3);
+        var solution = new TestdataListSolution();
+        solution.setEntityList(List.of(e1, e2, e3));
+        solution.setValueList(List.of(v1, v2, v3));
+        SolutionManager.updateShadowVariables(solution);
+
+        InnerScoreDirector<TestdataListSolution, SimpleScore> scoreDirector =
+                mockScoreDirector(TestdataListSolution.buildSolutionDescriptor());
+        scoreDirector.setWorkingSolution(solution);
+
+        ListVariableDescriptor<TestdataListSolution> listVariableDescriptor = getListVariableDescriptor(scoreDirector);
+        RandomListSwapIterator<TestdataListSolution> randomListSwapIterator = new RandomListSwapIterator<>(
+                scoreDirector.getListVariableState(listVariableDescriptor),
+                mockIterableValueSelector(listVariableDescriptor, v1, v1, v1, v3),
+                mockIterableValueSelector(listVariableDescriptor, v1, v2, v3, v1));
+
+        assertCodesOfIterator(randomListSwapIterator,
+                "No change",
+                "1 {A[0]} <-> 2 {A[1]}",
+                "1 {A[0]} <-> 3 {C[0]}",
+                "3 {C[0]} <-> 1 {A[0]}");
+    }
+}

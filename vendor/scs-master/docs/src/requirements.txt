@@ -1,0 +1,9 @@
+# Pinned so that the published docs are reproducible. Bump deliberately, and
+# rebuild with `-W` (see Makefile) to catch new deprecation warnings before
+# they reach the site.
+#
+# docs.yml installs from this file; keep it as the single source of truth.
+sphinx==9.2.0
+sphinx-rtd-theme==3.1.0
+breathe==5.1.0
+docutils==0.22.4

@@ -1,0 +1,10 @@
+quarkus:
+  timefold:
+    solver:
+      environment-mode: FULL_ASSERT
+      daemon: true
+      move-thread-count: 2
+      termination:
+        spent-limit: 4h
+        unimproved-spent-limit: 5h
+        best-score-limit: 0

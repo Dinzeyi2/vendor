@@ -1,0 +1,43 @@
+package ai.timefold.solver.core.impl.bavet.quad;
+
+import java.util.function.IntSupplier;
+
+import ai.timefold.solver.core.api.function.QuadFunction;
+import ai.timefold.solver.core.api.score.stream.quad.QuadConstraintCollector;
+import ai.timefold.solver.core.config.solver.EnvironmentMode;
+import ai.timefold.solver.core.impl.bavet.common.tuple.QuadTuple;
+import ai.timefold.solver.core.impl.bavet.common.tuple.TupleLifecycle;
+import ai.timefold.solver.core.impl.util.Pair;
+
+public final class Group2Mapping2CollectorQuadNode<OldA, OldB, OldC, OldD, A, B, C, D, ResultContainerC_, ResultContainerD_>
+        extends
+        AbstractGroupQuadNode<OldA, OldB, OldC, OldD, QuadTuple<A, B, C, D>, Pair<A, B>, Object, Pair<C, D>> {
+
+    private final int outputStoreSize;
+
+    public Group2Mapping2CollectorQuadNode(QuadFunction<OldA, OldB, OldC, OldD, A> groupKeyMappingA,
+            QuadFunction<OldA, OldB, OldC, OldD, B> groupKeyMappingB,
+            IntSupplier storeIndexReserver,
+            QuadConstraintCollector<OldA, OldB, OldC, OldD, ResultContainerC_, C> collectorC,
+            QuadConstraintCollector<OldA, OldB, OldC, OldD, ResultContainerD_, D> collectorD,
+            TupleLifecycle<QuadTuple<A, B, C, D>> nextNodesTupleLifecycle, int outputStoreSize,
+            EnvironmentMode environmentMode) {
+        super(storeIndexReserver,
+                tuple -> Group2Mapping0CollectorQuadNode.createGroupKey(groupKeyMappingA, groupKeyMappingB, tuple),
+                Group0Mapping2CollectorQuadNode.mergeCollectors(collectorC, collectorD), nextNodesTupleLifecycle,
+                environmentMode);
+        this.outputStoreSize = outputStoreSize;
+    }
+
+    @Override
+    protected QuadTuple<A, B, C, D> createOutTuple(Pair<A, B> groupKey) {
+        return QuadTuple.of(groupKey.key(), groupKey.value(), outputStoreSize);
+    }
+
+    @Override
+    protected void updateOutTupleToResult(QuadTuple<A, B, C, D> outTuple, Pair<C, D> result) {
+        outTuple.setC(result.key());
+        outTuple.setD(result.value());
+    }
+
+}

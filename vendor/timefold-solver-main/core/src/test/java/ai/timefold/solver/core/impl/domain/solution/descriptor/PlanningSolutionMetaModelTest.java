@@ -1,0 +1,309 @@
+package ai.timefold.solver.core.impl.domain.solution.descriptor;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.SoftAssertions.assertSoftly;
+
+import ai.timefold.solver.core.preview.api.domain.metamodel.GenuineEntityMetaModel;
+import ai.timefold.solver.core.preview.api.domain.metamodel.PlanningListVariableMetaModel;
+import ai.timefold.solver.core.preview.api.domain.metamodel.PlanningSolutionMetaModel;
+import ai.timefold.solver.core.preview.api.domain.metamodel.ShadowEntityMetaModel;
+import ai.timefold.solver.core.preview.api.domain.metamodel.ShadowVariableMetaModel;
+import ai.timefold.solver.core.preview.api.domain.metamodel.VariableMetaModel;
+import ai.timefold.solver.core.testdomain.TestdataEntity;
+import ai.timefold.solver.core.testdomain.TestdataSolution;
+import ai.timefold.solver.core.testdomain.TestdataValue;
+import ai.timefold.solver.core.testdomain.list.TestdataListEntity;
+import ai.timefold.solver.core.testdomain.list.TestdataListSolution;
+import ai.timefold.solver.core.testdomain.list.TestdataListValue;
+import ai.timefold.solver.core.testdomain.shadow.extended.TestdataDeclarativeExtendedBaseValue;
+import ai.timefold.solver.core.testdomain.shadow.extended.TestdataDeclarativeExtendedSolution;
+import ai.timefold.solver.core.testdomain.shadow.extended.TestdataDeclarativeExtendedSubclassValue;
+
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Test;
+
+class PlanningSolutionMetaModelTest {
+
+    @Nested
+    @DisplayName("Solution with a basic variable")
+    class BasicVariablePlanningSolutionMetaModelTest {
+
+        private final SolutionDescriptor<TestdataSolution> solutionDescriptor = TestdataSolution.buildSolutionDescriptor();
+        private final PlanningSolutionMetaModel<TestdataSolution> planningSolutionMetaModel = solutionDescriptor.getMetaModel();
+
+        @Test
+        void hasProperType() {
+            assertThat(planningSolutionMetaModel.type())
+                    .isEqualTo(TestdataSolution.class);
+        }
+
+        @Test
+        void hasProperEntities() {
+            assertThat(planningSolutionMetaModel.entities())
+                    .containsOnly(planningSolutionMetaModel.entity(TestdataEntity.class));
+        }
+
+        @Test
+        void hasProperGenuineEntities() {
+            assertThat(planningSolutionMetaModel.genuineEntities())
+                    .containsOnly(planningSolutionMetaModel.genuineEntity(TestdataEntity.class));
+        }
+
+        @Test
+        void failsOnWrongEntities() {
+            assertSoftly(softly -> {
+                softly.assertThatThrownBy(() -> planningSolutionMetaModel.entity(TestdataListEntity.class))
+                        .hasMessageContaining(TestdataListEntity.class.getSimpleName());
+                softly.assertThatThrownBy(() -> planningSolutionMetaModel.entity(TestdataValue.class))
+                        .hasMessageContaining(TestdataValue.class.getSimpleName());
+            });
+        }
+
+        @Nested
+        @DisplayName("with a genuine entity")
+        class BasicVariablePlanningEntityMetaModelTest {
+
+            private final GenuineEntityMetaModel<TestdataSolution, TestdataEntity> planningEntityMetaModel =
+                    planningSolutionMetaModel.genuineEntity(TestdataEntity.class);
+
+            @Test
+            void hasProperParent() {
+                assertThat(planningEntityMetaModel.solution())
+                        .isSameAs(planningSolutionMetaModel);
+            }
+
+            @Test
+            void hasProperType() {
+                assertThat(planningEntityMetaModel.type())
+                        .isEqualTo(TestdataEntity.class);
+            }
+
+            @Test
+            void isGenuine() {
+                assertThat(planningEntityMetaModel.isGenuine())
+                        .isTrue();
+            }
+
+            @Test
+            void hasProperVariables() {
+                var variableMetaModel = planningEntityMetaModel.genuineVariable("value");
+                assertThat(planningEntityMetaModel.genuineVariables()).containsOnly(variableMetaModel);
+            }
+
+            @Test
+            void failsOnNonExistingVariable() {
+                assertThatThrownBy(() -> planningEntityMetaModel.variable("nonExisting"))
+                        .hasMessageContaining("nonExisting");
+            }
+
+            @Nested
+            @DisplayName("with a genuine variable")
+            class PlanningVariableMetaModelTest {
+
+                private final VariableMetaModel<TestdataSolution, TestdataEntity, TestdataValue> variableMetaModel =
+                        planningEntityMetaModel.variable("value");
+
+                @Test
+                void hasProperParent() {
+                    assertThat(variableMetaModel.entity())
+                            .isSameAs(planningEntityMetaModel);
+                }
+
+                @Test
+                void hasProperType() {
+                    assertThat(variableMetaModel.type())
+                            .isEqualTo(TestdataValue.class);
+                }
+
+            }
+
+        }
+    }
+
+    @Nested
+    @DisplayName("Solution with a list variable")
+    class ListVariablePlanningSolutionMetaModelTest {
+
+        private final SolutionDescriptor<TestdataListSolution> solutionDescriptor =
+                TestdataListSolution.buildSolutionDescriptor();
+        private final PlanningSolutionMetaModel<TestdataListSolution> planningSolutionMetaModel =
+                solutionDescriptor.getMetaModel();
+
+        @Test
+        void hasProperType() {
+            assertThat(planningSolutionMetaModel.type())
+                    .isEqualTo(TestdataListSolution.class);
+        }
+
+        @Test
+        void hasProperEntities() {
+            assertThat(planningSolutionMetaModel.entities())
+                    .containsExactly(
+                            planningSolutionMetaModel.entity(TestdataListEntity.class),
+                            planningSolutionMetaModel.entity(TestdataListValue.class));
+        }
+
+        @Test
+        void hasProperGenuineEntities() {
+            assertThat(planningSolutionMetaModel.genuineEntities())
+                    .containsOnly(planningSolutionMetaModel.genuineEntity(TestdataListEntity.class));
+        }
+
+        @Test
+        void failsOnWrongEntities() {
+            assertSoftly(softly -> {
+                softly.assertThatThrownBy(() -> planningSolutionMetaModel.entity(TestdataEntity.class))
+                        .hasMessageContaining(TestdataEntity.class.getSimpleName());
+                softly.assertThatThrownBy(() -> planningSolutionMetaModel.entity(TestdataValue.class))
+                        .hasMessageContaining(TestdataValue.class.getSimpleName());
+            });
+        }
+
+        @Nested
+        @DisplayName("with a genuine entity")
+        class GenuinePlanningEntityMetaModelTest {
+
+            private final GenuineEntityMetaModel<TestdataListSolution, TestdataListEntity> planningEntityMetaModel =
+                    planningSolutionMetaModel.genuineEntity(TestdataListEntity.class);
+
+            @Test
+            void hasProperParent() {
+                assertThat(planningEntityMetaModel.solution())
+                        .isSameAs(planningSolutionMetaModel);
+            }
+
+            @Test
+            void hasProperType() {
+                assertThat(planningEntityMetaModel.type())
+                        .isEqualTo(TestdataListEntity.class);
+            }
+
+            @Test
+            void isGenuine() {
+                assertThat(planningEntityMetaModel.isGenuine())
+                        .isTrue();
+            }
+
+            @Test
+            void hasProperVariables() {
+                var variableMetaModel = planningEntityMetaModel.genuineVariable("valueList");
+                assertThat(planningEntityMetaModel.genuineVariables()).containsOnly(variableMetaModel);
+            }
+
+            @Test
+            void failsOnNonExistingVariable() {
+                assertThatThrownBy(() -> planningEntityMetaModel.variable("nonExisting"))
+                        .hasMessageContaining("nonExisting");
+            }
+
+            @Nested
+            @DisplayName("with a genuine variable")
+            class PlanningListVariableMetaModelTest {
+
+                private final PlanningListVariableMetaModel<TestdataListSolution, TestdataListEntity, TestdataListValue> variableMetaModel =
+                        (PlanningListVariableMetaModel<TestdataListSolution, TestdataListEntity, TestdataListValue>) planningEntityMetaModel
+                                .<TestdataListValue> variable("valueList");
+
+                @Test
+                void hasProperParent() {
+                    assertThat(variableMetaModel.entity())
+                            .isSameAs(planningEntityMetaModel);
+                }
+
+                @Test
+                void hasProperType() {
+                    assertThat(variableMetaModel.type())
+                            .isEqualTo(TestdataListValue.class);
+                }
+
+            }
+
+        }
+
+        @Nested
+        @DisplayName("with a shadow entity")
+        class ShadowPlanningEntityMetaModelTest {
+
+            private final ShadowEntityMetaModel<TestdataListSolution, TestdataListValue> planningEntityMetaModel =
+                    planningSolutionMetaModel.shadowEntity(TestdataListValue.class);
+
+            @Test
+            void hasProperParent() {
+                assertThat(planningEntityMetaModel.solution())
+                        .isSameAs(planningSolutionMetaModel);
+            }
+
+            @Test
+            void hasProperType() {
+                assertThat(planningEntityMetaModel.type())
+                        .isEqualTo(TestdataListValue.class);
+            }
+
+            @Test
+            void isNotGenuine() {
+                assertThat(planningEntityMetaModel.isGenuine())
+                        .isFalse();
+            }
+
+            @Test
+            void hasProperVariables() {
+                var inverseVariableMetaModel = planningEntityMetaModel.<TestdataListEntity> variable("entity");
+                var indexVariableMetaModel = planningEntityMetaModel.<Integer> variable("index");
+                assertSoftly(softly -> softly.assertThat(planningEntityMetaModel.variables())
+                        .containsExactly(inverseVariableMetaModel, indexVariableMetaModel));
+            }
+
+            @Test
+            void failsOnNonExistingVariable() {
+                assertThatThrownBy(() -> planningEntityMetaModel.variable("nonExisting"))
+                        .hasMessageContaining("nonExisting");
+            }
+
+            @Nested
+            @DisplayName("with a shadow variable")
+            class ShadowVariableMetaModelTest {
+
+                private final ShadowVariableMetaModel<TestdataListSolution, TestdataListValue, TestdataListEntity> inverseVariableMetaModel =
+                        planningEntityMetaModel.<TestdataListEntity> variable("entity");
+
+                @Test
+                void hasProperParent() {
+                    assertThat(inverseVariableMetaModel.entity())
+                            .isSameAs(planningEntityMetaModel);
+                }
+
+                @Test
+                void hasProperType() {
+                    assertThat(inverseVariableMetaModel.type())
+                            .isEqualTo(TestdataListEntity.class);
+                }
+
+            }
+
+        }
+    }
+
+    @SuppressWarnings({ "unchecked", "rawtypes" })
+    @Test
+    void inheritedVariableIsEqualAcrossEntities() {
+        var solutionMetaModel = TestdataDeclarativeExtendedSolution.buildSolutionDescriptor().getMetaModel();
+        var baseEntityMetaModel = solutionMetaModel.entity(TestdataDeclarativeExtendedBaseValue.class);
+        var subclassEntityMetaModel = solutionMetaModel.entity(TestdataDeclarativeExtendedSubclassValue.class);
+        var baseVariableMetaModel = baseEntityMetaModel.variable("previous");
+        var subclassVariableMetaModel = subclassEntityMetaModel.variable("previous");
+        var subclassOwnVariableMetaModel = subclassEntityMetaModel.variable("codeSum");
+
+        assertSoftly(softly -> {
+            softly.assertThat(subclassVariableMetaModel).isEqualTo(baseVariableMetaModel);
+            softly.assertThat(subclassVariableMetaModel).hasSameHashCodeAs(baseVariableMetaModel);
+            softly.assertThat(((Comparable) subclassVariableMetaModel).compareTo(baseVariableMetaModel)).isZero();
+            softly.assertThat(subclassVariableMetaModel.entity()).isSameAs(subclassEntityMetaModel);
+            softly.assertThat(baseVariableMetaModel.entity()).isSameAs(baseEntityMetaModel);
+            // Ordinals restart for each declaring entity; comparison must still tell these apart.
+            softly.assertThat(((Comparable) subclassVariableMetaModel).compareTo(subclassOwnVariableMetaModel)).isNotZero();
+        });
+    }
+
+}

@@ -1,0 +1,57 @@
+package ai.timefold.solver.core.impl.bavet.quad;
+
+import java.util.function.Function;
+
+import ai.timefold.solver.core.impl.bavet.common.AbstractConcatNode;
+import ai.timefold.solver.core.impl.bavet.common.tuple.QuadTuple;
+import ai.timefold.solver.core.impl.bavet.common.tuple.TupleLifecycle;
+import ai.timefold.solver.core.impl.bavet.common.tuple.UniTuple;
+
+public final class ConcatUniQuadNode<A, B, C, D>
+        extends AbstractConcatNode<UniTuple<A>, QuadTuple<A, B, C, D>, QuadTuple<A, B, C, D>> {
+
+    private final Function<A, B> paddingFunctionB;
+    private final Function<A, C> paddingFunctionC;
+    private final Function<A, D> paddingFunctionD;
+
+    public ConcatUniQuadNode(Function<A, B> paddingFunctionB, Function<A, C> paddingFunctionC, Function<A, D> paddingFunctionD,
+            TupleLifecycle<QuadTuple<A, B, C, D>> nextNodesTupleLifecycle,
+            int inputStoreIndexLeftOutTupleList, int inputStoreIndexRightOutTupleList,
+            int outputStoreSize) {
+        super(nextNodesTupleLifecycle, inputStoreIndexLeftOutTupleList, inputStoreIndexRightOutTupleList,
+                outputStoreSize);
+        this.paddingFunctionB = paddingFunctionB;
+        this.paddingFunctionC = paddingFunctionC;
+        this.paddingFunctionD = paddingFunctionD;
+    }
+
+    @Override
+    protected QuadTuple<A, B, C, D> getOutTupleFromLeft(UniTuple<A> leftTuple) {
+        var factA = leftTuple.getA();
+        return QuadTuple.of(factA, paddingFunctionB.apply(factA), paddingFunctionC.apply(factA), paddingFunctionD.apply(factA),
+                outputStoreSize);
+    }
+
+    @Override
+    protected QuadTuple<A, B, C, D> getOutTupleFromRight(QuadTuple<A, B, C, D> rightTuple) {
+        return QuadTuple.of(rightTuple.getA(), rightTuple.getB(), rightTuple.getC(), rightTuple.getD(), outputStoreSize);
+    }
+
+    @Override
+    protected void updateOutTupleFromLeft(UniTuple<A> leftTuple, QuadTuple<A, B, C, D> outTuple) {
+        var factA = leftTuple.getA();
+        outTuple.setA(factA);
+        outTuple.setB(paddingFunctionB.apply(factA));
+        outTuple.setC(paddingFunctionC.apply(factA));
+        outTuple.setD(paddingFunctionD.apply(factA));
+    }
+
+    @Override
+    protected void updateOutTupleFromRight(QuadTuple<A, B, C, D> rightTuple, QuadTuple<A, B, C, D> outTuple) {
+        outTuple.setA(rightTuple.getA());
+        outTuple.setB(rightTuple.getB());
+        outTuple.setC(rightTuple.getC());
+        outTuple.setD(rightTuple.getD());
+    }
+
+}

@@ -1,0 +1,390 @@
+package ai.timefold.solver.core.impl.heuristic.selector.value.decorator;
+
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.List;
+import java.util.NoSuchElementException;
+import java.util.Objects;
+
+import ai.timefold.solver.core.config.heuristic.selector.common.SelectionCacheType;
+import ai.timefold.solver.core.impl.domain.variable.ListVariableState;
+import ai.timefold.solver.core.impl.domain.variable.descriptor.GenuineVariableDescriptor;
+import ai.timefold.solver.core.impl.domain.variable.descriptor.ListVariableDescriptor;
+import ai.timefold.solver.core.impl.heuristic.selector.AbstractDemandEnabledSelector;
+import ai.timefold.solver.core.impl.heuristic.selector.common.ReachableValues;
+import ai.timefold.solver.core.impl.heuristic.selector.common.decorator.SelectionSorter;
+import ai.timefold.solver.core.impl.heuristic.selector.list.DestinationSelectorFactory;
+import ai.timefold.solver.core.impl.heuristic.selector.move.generic.list.ListChangeMoveSelector;
+import ai.timefold.solver.core.impl.heuristic.selector.move.generic.list.ListChangeMoveSelectorFactory;
+import ai.timefold.solver.core.impl.heuristic.selector.move.generic.list.ListSwapMoveSelector;
+import ai.timefold.solver.core.impl.heuristic.selector.move.generic.list.ListSwapMoveSelectorFactory;
+import ai.timefold.solver.core.impl.heuristic.selector.value.IterableValueSelector;
+import ai.timefold.solver.core.impl.heuristic.selector.value.ValueSelectorFactory;
+import ai.timefold.solver.core.impl.phase.scope.AbstractPhaseScope;
+import ai.timefold.solver.core.impl.solver.scope.SolverScope;
+
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
+
+/**
+ * The decorator returns a list of reachable values for a specific value.
+ * It enables the creation of a filtering tier when using entity-provided value ranges,
+ * ensuring only valid and reachable values are returned.
+ * A value is considered reachable to another value if both exist within their respective entity value ranges.
+ * <p>
+ * The decorator can only be applied to list variables.
+ * 
+ * <pre>{@code
+ * e1 = entity_range[v1, v2, v3]
+ * e2 = entity_range[v1, v4]
+ * v1 = [v2, v3, v4]
+ * v2 = [v1, v3]
+ * v3 = [v1, v2]
+ * v4 = [v1]
+ * }</pre>
+ * 
+ * This node is currently used by the {@link ListChangeMoveSelector} and {@link ListSwapMoveSelector} selectors.
+ * To illustrate its usage, let’s assume how moves are generated for the list swap type.
+ * Initially, the swap move selector used a left value selector to choose a value.
+ * After that, it uses a right value selector to choose another value to swap them.
+ * <p>
+ * Based on the previously described process and the current goal of this node,
+ * we can observe that once a value is selected using the left value selector,
+ * the right node can filter out all non-reachable values and generate a valid move.
+ * A move is considered valid only if both entities accept each other's values.
+ * The filtering process of invalid values allows the solver to explore the solution space more efficiently.
+ *
+ * @see ListChangeMoveSelectorFactory
+ * @see DestinationSelectorFactory
+ * @see ListSwapMoveSelectorFactory
+ * @see ValueSelectorFactory
+ *
+ * @param <Solution_> the solution type
+ */
+public final class FilteringValueRangeSelector<Solution_> extends AbstractDemandEnabledSelector<Solution_>
+        implements IterableValueSelector<Solution_> {
+
+    private final IterableValueSelector<Solution_> nonReplayingValueSelector;
+    private final IterableValueSelector<Solution_> replayingValueSelector;
+    private final SelectionSorter<Solution_, Object> selectionSorter;
+    private final boolean randomSelection;
+
+    private Object replayedValue = null;
+    private long valuesSize;
+    private ListVariableState<Solution_, Object, Object> listVariableState;
+    private ReachableValues<Object, Object> reachableValues;
+
+    private final boolean checkSourceAndDestination;
+
+    public FilteringValueRangeSelector(IterableValueSelector<Solution_> nonReplayingValueSelector,
+            IterableValueSelector<Solution_> replayingValueSelector, boolean randomSelection,
+            boolean checkSourceAndDestination) {
+        this.nonReplayingValueSelector = nonReplayingValueSelector;
+        this.replayingValueSelector = replayingValueSelector;
+        this.selectionSorter = nonReplayingValueSelector.getSelectionSorter();
+        this.randomSelection = randomSelection;
+        this.checkSourceAndDestination = checkSourceAndDestination;
+    }
+
+    // ************************************************************************
+    // Lifecycle methods
+    // ************************************************************************
+
+    @Override
+    public void solvingStarted(SolverScope<Solution_> solverScope) {
+        super.solvingStarted(solverScope);
+        this.nonReplayingValueSelector.solvingStarted(solverScope);
+        this.replayingValueSelector.solvingStarted(solverScope);
+    }
+
+    @Override
+    public void phaseStarted(AbstractPhaseScope<Solution_> phaseScope) {
+        super.phaseStarted(phaseScope);
+        this.listVariableState = phaseScope.getSolverScope().getScoreDirector()
+                .getListVariableState((ListVariableDescriptor<Solution_>) nonReplayingValueSelector.getVariableDescriptor());
+        this.nonReplayingValueSelector.phaseStarted(phaseScope);
+        this.replayingValueSelector.phaseStarted(phaseScope);
+        this.reachableValues = phaseScope.getScoreDirector().getValueRangeManager()
+                .getReachableValues(listVariableState.getSourceVariableDescriptor(), selectionSorter);
+        valuesSize = reachableValues.getSize();
+    }
+
+    @Override
+    public void phaseEnded(AbstractPhaseScope<Solution_> phaseScope) {
+        super.phaseEnded(phaseScope);
+        this.nonReplayingValueSelector.phaseEnded(phaseScope);
+        this.replayingValueSelector.phaseEnded(phaseScope);
+        this.replayedValue = null;
+        this.reachableValues = null;
+        this.listVariableState = null;
+    }
+
+    // ************************************************************************
+    // Worker methods
+    // ************************************************************************
+
+    public IterableValueSelector<Solution_> getChildValueSelector() {
+        return nonReplayingValueSelector;
+    }
+
+    @Override
+    public <T> SelectionSorter<Solution_, T> getSelectionSorter() {
+        return nonReplayingValueSelector.getSelectionSorter();
+    }
+
+    @Override
+    public SelectionCacheType getCacheType() {
+        return nonReplayingValueSelector.getCacheType();
+    }
+
+    @Override
+    public GenuineVariableDescriptor<Solution_> getVariableDescriptor() {
+        return nonReplayingValueSelector.getVariableDescriptor();
+    }
+
+    @Override
+    public boolean isNeverEnding() {
+        return nonReplayingValueSelector.isNeverEnding();
+    }
+
+    @Override
+    public long getSize(Object entity) {
+        return getSize();
+    }
+
+    @Override
+    public long getSize() {
+        return valuesSize;
+    }
+
+    @Override
+    public Iterator<Object> iterator(Object entity) {
+        return iterator();
+    }
+
+    /**
+     * The expected replayed value corresponds to the selected value when the replaying selector has the next value.
+     * Once it is selected, it will be reused until a new value is replayed by the recorder selector.
+     */
+    private Object selectReplayedValue() {
+        var iterator = replayingValueSelector.iterator();
+        if (iterator.hasNext()) {
+            replayedValue = iterator.next();
+        }
+        return replayedValue;
+    }
+
+    @Override
+    public Iterator<Object> iterator() {
+        return randomSelection ? new RandomFilteringValueRangeIterator() : new OriginalFilteringValueRangeIterator();
+    }
+
+    @Override
+    public Iterator<Object> endingIterator(Object entity) {
+        return new OriginalFilteringValueRangeIterator();
+    }
+
+    @Override
+    public boolean equals(Object other) {
+        return other instanceof FilteringValueRangeSelector<?> that
+                && Objects.equals(nonReplayingValueSelector, that.nonReplayingValueSelector)
+                && Objects.equals(replayingValueSelector, that.replayingValueSelector)
+                && Objects.equals(selectionSorter, that.selectionSorter);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(nonReplayingValueSelector, replayingValueSelector, selectionSorter);
+    }
+
+    @NullMarked
+    private abstract class AbstractFilteringValueRangeIterator implements Iterator<Object> {
+        private boolean initialized = false;
+        private boolean hasData = false;
+        @Nullable
+        Object currentUpcomingValue;
+        @Nullable
+        private Object currentUpcomingEntity;
+        @Nullable
+        List<Object> currentUpcomingValueList;
+
+        void initialize() {
+            if (initialized) {
+                return;
+            }
+            checkUpcomingValue();
+        }
+
+        void checkUpcomingValue() {
+            if (currentUpcomingValue != null) {
+                var updatedUpcomingValue = selectReplayedValue();
+                if (updatedUpcomingValue != currentUpcomingValue) {
+                    // The iterator may be reused
+                    // like in the ElementPositionRandomIterator,
+                    // even if the entity has changed.
+                    // Therefore,
+                    // we need to update the value list to ensure it is consistent.
+                    loadValues(updatedUpcomingValue);
+                }
+            } else {
+                loadValues(selectReplayedValue());
+            }
+        }
+
+        /**
+         * This method initializes the basic structure required for the child iterators,
+         * including the upcoming entity and the upcoming list.
+         *
+         * @param upcomingValue the upcoming value
+         */
+        private void loadValues(@Nullable Object upcomingValue) {
+            if (upcomingValue == null) {
+                noData();
+                return;
+            }
+            if (upcomingValue == currentUpcomingValue) {
+                return;
+            }
+            currentUpcomingValue = upcomingValue;
+            currentUpcomingEntity = null;
+            currentUpcomingValueList = null;
+            if (checkSourceAndDestination) {
+                // Load the current assigned entity of the selected value
+                currentUpcomingEntity = listVariableState.getInverseSingleton(currentUpcomingValue);
+            }
+            currentUpcomingValueList = reachableValues.extractValuesAsList(currentUpcomingValue);
+            // The list contains the upcoming value itself.
+            this.hasData = currentUpcomingValueList.size() > 1;
+            this.initialized = true;
+            if (hasData) {
+                processUpcomingValue();
+            }
+        }
+
+        abstract void processUpcomingValue();
+
+        boolean hasNoData() {
+            return !hasData;
+        }
+
+        private void noData() {
+            this.currentUpcomingValue = null;
+            this.currentUpcomingEntity = null;
+            this.hasData = false;
+            this.initialized = true;
+            this.currentUpcomingValueList = Collections.emptyList();
+        }
+
+        boolean isReachable(Object destinationValue) {
+            // The reachable value list contains the upcoming value itself.
+            if (destinationValue == currentUpcomingValue) {
+                return false;
+            }
+            var destinationEntity = listVariableState.getInverseSingleton(destinationValue);
+            if (checkSourceAndDestination) {
+                return reachableValues.isEntityReachable(Objects.requireNonNull(currentUpcomingValue), destinationEntity)
+                        && reachableValues.isEntityReachable(Objects.requireNonNull(destinationValue), currentUpcomingEntity);
+            } else {
+                return reachableValues.isEntityReachable(Objects.requireNonNull(currentUpcomingValue), destinationEntity);
+            }
+        }
+    }
+
+    @NullMarked
+    private class OriginalFilteringValueRangeIterator extends AbstractFilteringValueRangeIterator {
+        // The value iterator returns all reachable values
+        private @Nullable Iterator<Object> reachableValueIterator;
+        private @Nullable Object selected = null;
+
+        @Override
+        void processUpcomingValue() {
+            reachableValueIterator = Objects.requireNonNull(currentUpcomingValueList).iterator();
+            this.selected = null;
+        }
+
+        @Override
+        public boolean hasNext() {
+            this.selected = pickNext();
+            return selected != null;
+        }
+
+        private @Nullable Object pickNext() {
+            if (selected != null) {
+                throw new IllegalStateException("The next value has already been picked.");
+            }
+            initialize();
+            this.selected = null;
+            if (hasNoData()) {
+                return null;
+            }
+            while (reachableValueIterator.hasNext()) {
+                var value = reachableValueIterator.next();
+                if (isReachable(value)) {
+                    return value;
+                }
+            }
+            return null;
+        }
+
+        @Override
+        public Object next() {
+            if (selected == null) {
+                throw new NoSuchElementException();
+            }
+            var result = selected;
+            this.selected = null;
+            return result;
+        }
+    }
+
+    @NullMarked
+    private class RandomFilteringValueRangeIterator extends AbstractFilteringValueRangeIterator {
+
+        private int maxBailoutSize;
+        private int replayedValueIndex;
+
+        @Override
+        void processUpcomingValue() {
+            var upcomingValue = Objects.requireNonNull(currentUpcomingValue);
+            this.replayedValueIndex = reachableValues.indexOfInValueList(upcomingValue);
+            if (replayedValueIndex < 0) {
+                throw new IllegalStateException("Impossible state: the value (%s) is not in its own reachable value list."
+                        .formatted(upcomingValue));
+            }
+            this.maxBailoutSize = Objects.requireNonNull(currentUpcomingValueList).size() - 1;
+        }
+
+        @Override
+        public boolean hasNext() {
+            checkUpcomingValue();
+            return !hasNoData();
+        }
+
+        @Override
+        public Object next() {
+            if (hasNoData()) {
+                throw new NoSuchElementException();
+            }
+            var upcomingValue = Objects.requireNonNull(currentUpcomingValue);
+            var valueList = Objects.requireNonNull(currentUpcomingValueList);
+            var bailoutSize = maxBailoutSize;
+            do {
+                bailoutSize--;
+                // Draw from the other values only; the list contains the replayed value itself.
+                // Skipping its index keeps the draw order of a list without the replayed value.
+                var index = workingRandom.nextInt(valueList.size() - 1);
+                if (index >= replayedValueIndex) {
+                    index++;
+                }
+                var next = valueList.get(index);
+                if (isReachable(next)) {
+                    return next;
+                }
+            } while (bailoutSize > 0);
+            // if a valid move is not found with the given bailout size,
+            // we assign the same value to the left side, which will result in a non-doable move
+            return upcomingValue;
+        }
+    }
+
+}

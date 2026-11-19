@@ -1,0 +1,175 @@
+package ai.timefold.solver.core.impl.heuristic.selector.list;
+
+import static ai.timefold.solver.core.impl.heuristic.selector.move.generic.list.ListChangeMoveSelector.filterPinnedListPlanningVariableValuesWithIndex;
+
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.Objects;
+
+import ai.timefold.solver.core.api.domain.solution.PlanningSolution;
+import ai.timefold.solver.core.impl.domain.entity.descriptor.EntityDescriptor;
+import ai.timefold.solver.core.impl.domain.variable.descriptor.ListVariableDescriptor;
+import ai.timefold.solver.core.impl.heuristic.selector.common.iterator.ConcatenatingIterator;
+import ai.timefold.solver.core.impl.heuristic.selector.entity.EntitySelector;
+import ai.timefold.solver.core.impl.heuristic.selector.value.IterableValueSelector;
+import ai.timefold.solver.core.impl.heuristic.selector.value.decorator.FilteringValueSelector;
+import ai.timefold.solver.core.impl.util.MappingIterator;
+import ai.timefold.solver.core.preview.api.domain.metamodel.ElementPosition;
+import ai.timefold.solver.core.preview.api.domain.metamodel.PositionInList;
+
+/**
+ * Selects destinations for list variable change moves. The destination specifies a future position in a list variable,
+ * expressed as an {@link PositionInList}, where a moved element or subList can be inserted.
+ * <p>
+ * Destination completeness is achieved by using both entity and value child selectors.
+ * When an entity <em>A</em> is selected, the destination becomes <em>A[0]</em>.
+ * When a value <em>x</em> is selected, its current position <em>A[i]</em> is determined using inverse and index supplies and
+ * the destination becomes <em>A[i + 1]</em>.
+ * <p>
+ * Fairness in random selection is achieved by first deciding between entity and value selector with a probability that is
+ * proportional to the entity/value ratio. The child entity and value selectors are assumed to be fair.
+ *
+ * @param <Solution_> the solution type, the class with the {@link PlanningSolution} annotation
+ */
+public final class ElementDestinationSelector<Solution_> extends AbstractListMoveSelector<Solution_>
+        implements DestinationSelector<Solution_> {
+
+    private final EntitySelector<Solution_> entitySelector;
+    private final IterableValueSelector<Solution_> replayingValueSelector;
+    private final IterableValueSelector<Solution_> valueSelector;
+    private final boolean randomSelection;
+    private final boolean isExhaustiveSearch;
+
+    public ElementDestinationSelector(EntitySelector<Solution_> entitySelector, IterableValueSelector<Solution_> valueSelector,
+            boolean randomSelection) {
+        this(entitySelector, null, valueSelector, randomSelection, false);
+    }
+
+    public ElementDestinationSelector(EntitySelector<Solution_> entitySelector,
+            IterableValueSelector<Solution_> replayingValueSelector, IterableValueSelector<Solution_> valueSelector,
+            boolean randomSelection, boolean isExhaustiveSearch) {
+        super((ListVariableDescriptor<Solution_>) valueSelector.getVariableDescriptor());
+        this.entitySelector = entitySelector;
+        var selector = filterPinnedListPlanningVariableValuesWithIndex(valueSelector, this::getListVariableState);
+        this.replayingValueSelector = replayingValueSelector;
+        this.valueSelector = listVariableDescriptor.allowsUnassignedValues() ? filterUnassignedValues(selector) : selector;
+        this.randomSelection = randomSelection;
+        this.isExhaustiveSearch = isExhaustiveSearch;
+        phaseLifecycleSupport.addEventListener(this.entitySelector);
+        phaseLifecycleSupport.addEventListener(this.valueSelector);
+    }
+
+    private IterableValueSelector<Solution_> filterUnassignedValues(
+            IterableValueSelector<Solution_> valueSelector) {
+        /*
+         * In case of list variable that allows unassigned values,
+         * unassigned elements will show up in the valueSelector.
+         * These skew the selection probability, so we need to exclude them.
+         * The option to unassign needs to be added to the iterator once later,
+         * to make sure that it can get selected.
+         *
+         * Example: for destination elements [A, B, C] where C is not initialized,
+         * the probability of unassigning a source element is 1/3 as it should be.
+         * (If destination is not initialized, it means source will be unassigned.)
+         * However, if B and C were not initialized, the probability of unassigning goes up to 2/3.
+         * The probability should be 1/2 instead.
+         * (Either select A as the destination, or unassign.)
+         * If we always remove unassigned elements from the iterator,
+         * and always add one option to unassign at the end,
+         * we can keep the correct probabilities throughout.
+         */
+        return FilteringValueSelector.ofAssigned(valueSelector, this::getListVariableState);
+    }
+
+    @Override
+    public long getSize() {
+        if (entitySelector.getSize() == 0) {
+            return 0;
+        }
+        return entitySelector.getSize() + valueSelector.getSize();
+    }
+
+    @Override
+    public Iterator<ElementPosition> iterator() {
+        if (randomSelection) {
+            if (isExhaustiveSearch) {
+                throw new IllegalStateException(
+                        "Impossible state: the random selector cannot be applied to the exhaustive search.");
+            }
+            var allowsUnassignedValues = listVariableDescriptor.allowsUnassignedValues();
+
+            // In case of list var which allows unassigned values, we need to exclude unassigned elements.
+            var totalValueSize = valueSelector.getSize()
+                    - (allowsUnassignedValues ? listVariableState.getUnassignedCount() : 0);
+            var totalSize = Math.addExact(entitySelector.getSize(), totalValueSize);
+            return new ElementPositionRandomIterator<>(listVariableState, entitySelector,
+                    replayingValueSelector != null ? replayingValueSelector.iterator() : null, valueSelector, workingRandom,
+                    totalSize, allowsUnassignedValues, allowsUnassignedValues && totalValueSize > 0);
+        } else {
+            if (entitySelector.getSize() == 0) {
+                return Collections.emptyIterator();
+            }
+            if (isExhaustiveSearch) {
+                // The exhaustive search method requires elements to be placed only at the end of the entity's list
+                return new MappingIterator<>(entitySelector.iterator(),
+                        entity -> ElementPosition.of(entity, listVariableDescriptor.getListSize(entity)));
+            } else {
+                // Start with the first unpinned value of each entity, or zero if no pinning.
+                // Entity selector is guaranteed to return only unpinned entities.
+                var entityIterator = new MappingIterator<>(entitySelector.iterator(),
+                        entity -> ElementPosition.of(entity, listVariableDescriptor.getFirstUnpinnedIndex(entity)));
+                // Filter guarantees that we only get values that are actually in one of the lists.
+                // Value selector guarantees only unpinned values.
+                var valueIterator = new MappingIterator<>(valueSelector.iterator(),
+                        v -> {
+                            var pos = listVariableState.getElementPosition(v).ensureAssigned();
+                            return ElementPosition.of(pos.entity(), pos.index() + 1);
+                        });
+                if (listVariableDescriptor.allowsUnassignedValues()) {
+                    // If the list variable allows unassigned values, add the option of unassigning.
+                    return new ConcatenatingIterator<>(entityIterator, valueIterator,
+                            Collections.singletonList(ElementPosition.unassigned()).iterator());
+                } else {
+                    return new ConcatenatingIterator<>(entityIterator, valueIterator);
+                }
+            }
+        }
+    }
+
+    @Override
+    public boolean isNeverEnding() {
+        return randomSelection || entitySelector.isNeverEnding() || valueSelector.isNeverEnding();
+    }
+
+    public ListVariableDescriptor<Solution_> getVariableDescriptor() {
+        return (ListVariableDescriptor<Solution_>) valueSelector.getVariableDescriptor();
+    }
+
+    public EntityDescriptor<Solution_> getEntityDescriptor() {
+        return entitySelector.getEntityDescriptor();
+    }
+
+    public Iterator<Object> endingIterator() {
+        return new ConcatenatingIterator<>(entitySelector.endingIterator(), valueSelector.endingIterator(null));
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        return o instanceof ElementDestinationSelector<?> that
+                && randomSelection == that.randomSelection
+                && Objects.equals(entitySelector, that.entitySelector)
+                && Objects.equals(replayingValueSelector, that.replayingValueSelector)
+                && Objects.equals(valueSelector, that.valueSelector);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(entitySelector, replayingValueSelector, valueSelector, randomSelection);
+    }
+
+    @Override
+    public String toString() {
+        return getClass().getSimpleName() + "(" + entitySelector + ", " + valueSelector + ")";
+    }
+
+}

@@ -1,0 +1,147 @@
+package ai.timefold.solver.benchmark.impl;
+
+import java.util.UUID;
+import java.util.concurrent.Callable;
+
+import ai.timefold.solver.benchmark.impl.result.SubSingleBenchmarkResult;
+import ai.timefold.solver.benchmark.impl.statistic.StatisticRegistry;
+import ai.timefold.solver.core.api.solver.ScoreAnalysisFetchPolicy;
+import ai.timefold.solver.core.api.solver.SolutionManager;
+import ai.timefold.solver.core.api.solver.SolutionUpdatePolicy;
+import ai.timefold.solver.core.config.solver.SolverConfig;
+import ai.timefold.solver.core.enterprise.TimefoldSolverEnterpriseService;
+import ai.timefold.solver.core.impl.solver.DefaultSolver;
+import ai.timefold.solver.core.impl.solver.DefaultSolverFactory;
+import ai.timefold.solver.core.impl.solver.monitoring.SolverTags;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
+
+import io.micrometer.core.instrument.Metrics;
+
+public class SubSingleBenchmarkRunner<Solution_> implements Callable<SubSingleBenchmarkRunner<Solution_>> {
+
+    public static final String NAME_MDC = "subSingleBenchmark.name";
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(SubSingleBenchmarkRunner.class);
+
+    private final SubSingleBenchmarkResult subSingleBenchmarkResult;
+    private final boolean warmUp;
+
+    private Long randomSeed = null;
+    private Throwable failureThrowable = null;
+
+    /**
+     * @param subSingleBenchmarkResult never null
+     */
+    public SubSingleBenchmarkRunner(SubSingleBenchmarkResult subSingleBenchmarkResult, boolean warmUp) {
+        this.subSingleBenchmarkResult = subSingleBenchmarkResult;
+        this.warmUp = warmUp;
+    }
+
+    public SubSingleBenchmarkResult getSubSingleBenchmarkResult() {
+        return subSingleBenchmarkResult;
+    }
+
+    public Long getRandomSeed() {
+        return randomSeed;
+    }
+
+    public Throwable getFailureThrowable() {
+        return failureThrowable;
+    }
+
+    public void setFailureThrowable(Throwable failureThrowable) {
+        this.failureThrowable = failureThrowable;
+    }
+
+    // ************************************************************************
+    // Benchmark methods
+    // ************************************************************************
+
+    @Override
+    public SubSingleBenchmarkRunner<Solution_> call() {
+        MDC.put(NAME_MDC, subSingleBenchmarkResult.getName());
+        var runtime = Runtime.getRuntime();
+        var singleBenchmarkResult = subSingleBenchmarkResult.getSingleBenchmarkResult();
+        var problemBenchmarkResult = singleBenchmarkResult.getProblemBenchmarkResult();
+        var problem = (Solution_) problemBenchmarkResult.readProblem();
+        if (!problemBenchmarkResult.getPlannerBenchmarkResult().hasMultipleParallelBenchmarks()) {
+            runtime.gc();
+            subSingleBenchmarkResult.setUsedMemoryAfterInputSolution(runtime.totalMemory() - runtime.freeMemory());
+        }
+        LOGGER.trace("Benchmark problem has been read for subSingleBenchmarkResult ({}).",
+                subSingleBenchmarkResult);
+
+        var solverConfig = singleBenchmarkResult.getSolverBenchmarkResult()
+                .getSolverConfig();
+        if (singleBenchmarkResult.getSubSingleCount() > 1) {
+            solverConfig = new SolverConfig(solverConfig);
+            solverConfig.offerRandomSeedFromSubSingleIndex(subSingleBenchmarkResult.getSubSingleBenchmarkIndex());
+        }
+        var runId = UUID.randomUUID().toString();
+        var subSingleBenchmarkSolverTags = SolverTags.withProblemId(runId);
+        solverConfig = new SolverConfig(solverConfig);
+        randomSeed = solverConfig.getRandomSeed();
+
+        // Defensive copy of solverConfig for every SingleBenchmarkResult to reset Random, tabu lists, ...
+        var solverFactory = new DefaultSolverFactory<Solution_>(new SolverConfig(solverConfig));
+
+        // Register metrics
+        var statisticRegistry = new StatisticRegistry<Solution_>(solverFactory.getSolutionDescriptor().getScoreDefinition());
+        Metrics.addRegistry(statisticRegistry);
+        var runTag = subSingleBenchmarkSolverTags.asTags();
+        subSingleBenchmarkResult.getEffectiveSubSingleStatisticMap().forEach((statisticType, subSingleStatistic) -> {
+            subSingleStatistic.open(statisticRegistry, runTag);
+            subSingleStatistic.initPointList();
+        });
+
+        var solver = (DefaultSolver<Solution_>) solverFactory.buildSolver();
+        solver.setMonitorTags(subSingleBenchmarkSolverTags);
+        solver.addPhaseLifecycleListener(statisticRegistry);
+        var result = solver.solveAndSummarize(problem);
+        var solution = result.solution();
+
+        solver.removePhaseLifecycleListener(statisticRegistry);
+        Metrics.removeRegistry(statisticRegistry);
+
+        for (var subSingleStatistic : subSingleBenchmarkResult.getEffectiveSubSingleStatisticMap().values()) {
+            subSingleStatistic.close(statisticRegistry, runTag);
+            subSingleStatistic.hibernatePointList();
+        }
+        if (!warmUp) {
+            var solverScope = solver.getSolverScope();
+            var solutionDescriptor = solverScope.getSolutionDescriptor();
+            problemBenchmarkResult.registerProblemSizeStatistics(result.problemSizeStatistics());
+            subSingleBenchmarkResult.setScore(solutionDescriptor.getScore(solution), result.solutionInitialized());
+            subSingleBenchmarkResult.setTimeMillisSpent(result.solvingDuration().toMillis());
+            subSingleBenchmarkResult.setScoreCalculationCount(result.scoreCalculationCount());
+            subSingleBenchmarkResult.setMoveEvaluationCount(result.moveEvaluationCount());
+
+            var solutionManager = SolutionManager.create(solverFactory);
+            var isConstraintMatchEnabled = solver.getSolverScope().getScoreDirector().getConstraintMatchPolicy()
+                    .isEnabled();
+            if (isConstraintMatchEnabled) { // Easy calculator fails otherwise.
+                var scoreExplanation = TimefoldSolverEnterpriseService.loadOrNull(b -> solutionManager.analyze(solution,
+                        ScoreAnalysisFetchPolicy.FETCH_MATCH_COUNT, SolutionUpdatePolicy.NO_UPDATE));
+                if (scoreExplanation != null) { // Avoid hard fail when Enterprise is not present.
+                    subSingleBenchmarkResult.setScoreExplanationSummary(scoreExplanation.summarize());
+                }
+            }
+            problemBenchmarkResult.writeSolution(subSingleBenchmarkResult, solution);
+        }
+        MDC.remove(NAME_MDC);
+        return this;
+    }
+
+    public String getName() {
+        return subSingleBenchmarkResult.getName();
+    }
+
+    @Override
+    public String toString() {
+        return subSingleBenchmarkResult.toString();
+    }
+
+}

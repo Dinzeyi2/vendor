@@ -1,0 +1,47 @@
+name: Build Docs (CI)
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/docs-ci.yml"
+      - "dowhy/**"
+      - "docs/**"
+      - "pyproject.toml"
+      - "poetry.lock"
+
+jobs:
+  docs:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        id: setup-python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc g++ pkg-config libgraphviz-dev graphviz-dev graphviz nodejs npm pandoc
+
+      - name: Install Poetry
+        run: '"${{ steps.setup-python.outputs.python-path }}" -m pip install poetry'
+
+      - name: Install Python Dependencies
+        env:
+          VIRTUALENV_PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        run: |
+          echo "VIRTUALENV_PYTHON=$VIRTUALENV_PYTHON" >> "$GITHUB_ENV"
+          poetry env use "${{ steps.setup-python.outputs.python-path }}"
+          poetry run python -c "import sys; print(sys.executable, sys.version); assert sys.version.split()[0] == '${{ steps.setup-python.outputs.python-version }}', sys.version"
+          poetry install -E plotting -E pydot -E pygraphviz -E econml --with docs
+      
+      - run: git config --global --add safe.directory /__w/dowhy/dowhy
+
+      - name: Build
+        run: ./docs/generate_docs.sh

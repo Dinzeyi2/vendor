@@ -1,0 +1,78 @@
+package ai.timefold.solver.core.impl.heuristic.selector.move.generic.list.ruin;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.LinkedHashSet;
+import java.util.random.RandomGenerator;
+
+import ai.timefold.solver.core.impl.domain.variable.ListVariableState;
+import ai.timefold.solver.core.impl.heuristic.move.SelectorBasedNoChangeMove;
+import ai.timefold.solver.core.impl.heuristic.selector.common.iterator.UpcomingSelectionIterator;
+import ai.timefold.solver.core.impl.heuristic.selector.move.generic.RuinRecreateConstructionHeuristicPhaseBuilder;
+import ai.timefold.solver.core.impl.heuristic.selector.value.IterableValueSelector;
+import ai.timefold.solver.core.impl.solver.scope.SolverScope;
+import ai.timefold.solver.core.preview.api.move.Move;
+
+final class ListRuinRecreateMoveIterator<Solution_> extends UpcomingSelectionIterator<Move<Solution_>> {
+
+    private final IterableValueSelector<Solution_> valueSelector;
+    private final RuinRecreateConstructionHeuristicPhaseBuilder<Solution_> constructionHeuristicPhaseBuilder;
+    private final SolverScope<Solution_> solverScope;
+    private final ListVariableState<Solution_, Object, Object> listVariableState;
+    private final int minimumRuinedCount;
+    private final int maximumRuinedCount;
+    private final RandomGenerator workingRandom;
+
+    public ListRuinRecreateMoveIterator(IterableValueSelector<Solution_> valueSelector,
+            RuinRecreateConstructionHeuristicPhaseBuilder<Solution_> constructionHeuristicPhaseBuilder,
+            SolverScope<Solution_> solverScope,
+            ListVariableState<Solution_, Object, Object> listVariableState, int minimumRuinedCount,
+            int maximumRuinedCount,
+            RandomGenerator workingRandom) {
+        this.valueSelector = valueSelector;
+        this.constructionHeuristicPhaseBuilder = constructionHeuristicPhaseBuilder;
+        this.solverScope = solverScope;
+        this.listVariableState = listVariableState;
+        this.minimumRuinedCount = minimumRuinedCount;
+        this.maximumRuinedCount = maximumRuinedCount;
+        this.workingRandom = workingRandom;
+    }
+
+    @Override
+    protected Move<Solution_> createUpcomingSelection() {
+        var valueIterator = valueSelector.iterator();
+        var ruinedCount = workingRandom.nextInt(minimumRuinedCount, maximumRuinedCount + 1);
+        var selectedValueList = new ArrayList<>(ruinedCount);
+        var affectedEntitySet = LinkedHashSet.newLinkedHashSet(ruinedCount);
+        var selectedValueSet = Collections.newSetFromMap(new IdentityHashMap<>(ruinedCount));
+        for (var i = 0; i < ruinedCount; i++) {
+            var remainingAttempts = ruinedCount;
+            while (true) {
+                if (!valueIterator.hasNext()) {
+                    // Bail out; cannot select enough unique elements.
+                    return SelectorBasedNoChangeMove.getInstance();
+                }
+                var selectedValue = valueIterator.next();
+                if (selectedValueSet.add(selectedValue)) {
+                    selectedValueList.add(selectedValue);
+                    var affectedEntity = listVariableState.getInverseSingleton(selectedValue);
+                    if (affectedEntity != null) {
+                        affectedEntitySet.add(affectedEntity);
+                    }
+                    break;
+                } else {
+                    remainingAttempts--;
+                }
+                if (remainingAttempts == 0) {
+                    // Bail out; cannot select enough unique elements.
+                    return SelectorBasedNoChangeMove.getInstance();
+                }
+            }
+        }
+        return new SelectorBasedListRuinRecreateMove<>(listVariableState.getSourceVariableDescriptor(),
+                constructionHeuristicPhaseBuilder, solverScope, selectedValueList, affectedEntitySet,
+                workingRandom.nextLong());
+    }
+
+}

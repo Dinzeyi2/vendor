@@ -1,0 +1,72 @@
+package ai.timefold.solver.core.impl.heuristic.selector.move.generic.list;
+
+import java.util.Iterator;
+import java.util.function.Supplier;
+
+import ai.timefold.solver.core.impl.domain.variable.ListVariableState;
+import ai.timefold.solver.core.impl.domain.variable.descriptor.ListVariableDescriptor;
+import ai.timefold.solver.core.impl.heuristic.selector.list.DestinationSelector;
+import ai.timefold.solver.core.impl.heuristic.selector.value.IterableValueSelector;
+import ai.timefold.solver.core.impl.heuristic.selector.value.decorator.FilteringValueSelector;
+import ai.timefold.solver.core.preview.api.move.Move;
+
+public final class ListChangeMoveSelector<Solution_> extends AbstractGenericListMoveSelector<Solution_> {
+
+    private final IterableValueSelector<Solution_> sourceValueSelector;
+    private final DestinationSelector<Solution_> destinationSelector;
+    private final boolean randomSelection;
+
+    public ListChangeMoveSelector(IterableValueSelector<Solution_> sourceValueSelector,
+            DestinationSelector<Solution_> destinationSelector, boolean randomSelection) {
+        super((ListVariableDescriptor<Solution_>) sourceValueSelector.getVariableDescriptor());
+        this.sourceValueSelector =
+                filterPinnedListPlanningVariableValuesWithIndex(sourceValueSelector, this::getListVariableState);
+        this.destinationSelector = destinationSelector;
+        this.randomSelection = randomSelection;
+        phaseLifecycleSupport.addEventListener(this.sourceValueSelector);
+        phaseLifecycleSupport.addEventListener(this.destinationSelector);
+    }
+
+    public static <Solution_> IterableValueSelector<Solution_> filterPinnedListPlanningVariableValuesWithIndex(
+            IterableValueSelector<Solution_> sourceValueSelector,
+            Supplier<ListVariableState<Solution_, Object, Object>> listVariableStateSupplier) {
+        var listVariableDescriptor = (ListVariableDescriptor<Solution_>) sourceValueSelector.getVariableDescriptor();
+        var supportsPinning = listVariableDescriptor.supportsPinning();
+        if (!supportsPinning) {
+            // Don't incur the overhead of filtering values if there is no pinning support.
+            return sourceValueSelector;
+        }
+        return (IterableValueSelector<Solution_>) FilteringValueSelector.of(sourceValueSelector,
+                (scoreDirector, selection) -> !listVariableStateSupplier.get().isPinned(selection));
+    }
+
+    @Override
+    public long getSize() {
+        return sourceValueSelector.getSize() * destinationSelector.getSize();
+    }
+
+    @Override
+    public Iterator<Move<Solution_>> iterator() {
+        if (randomSelection) {
+            return new RandomListChangeIterator<>(
+                    listVariableState,
+                    sourceValueSelector,
+                    destinationSelector);
+        } else {
+            return new OriginalListChangeIterator<>(
+                    listVariableState,
+                    sourceValueSelector,
+                    destinationSelector);
+        }
+    }
+
+    @Override
+    public boolean isNeverEnding() {
+        return randomSelection || sourceValueSelector.isNeverEnding() || destinationSelector.isNeverEnding();
+    }
+
+    @Override
+    public String toString() {
+        return getClass().getSimpleName() + "(" + sourceValueSelector + ", " + destinationSelector + ")";
+    }
+}

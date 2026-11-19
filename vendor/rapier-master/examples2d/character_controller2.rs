@@ -1,0 +1,197 @@
+use crate::utils::character;
+use crate::utils::character::CharacterControlMode;
+use kiss3d::color::Color;
+use rapier_testbed2d::TestbedViewer;
+use rapier2d::control::{KinematicCharacterController, PidController};
+use rapier2d::prelude::*;
+use std::f32::consts::PI;
+
+pub async fn run(viewer: &mut TestbedViewer) -> anyhow::Result<()> {
+    /*
+     * World
+     */
+    let mut world = PhysicsWorld::new();
+
+    /*
+     * Ground
+     */
+    let ground_size = 5.0;
+    let ground_height = 0.1;
+
+    let rigid_body = RigidBodyBuilder::fixed().translation(Vector::new(0.0, -ground_height));
+    let collider = ColliderBuilder::cuboid(ground_size, ground_height);
+    let _ = world.insert(rigid_body, collider);
+
+    /*
+     * Character we will control manually.
+     */
+    let rigid_body = RigidBodyBuilder::kinematic_position_based()
+        .translation(Vector::new(-3.0, 5.0))
+        // The two config below makes the character
+        // nicer to control with the PID control enabled.
+        .gravity_scale(10.0)
+        .soft_ccd_prediction(10.0);
+    let collider = ColliderBuilder::capsule_y(0.3, 0.15);
+    let (character_handle, _) = world.insert(rigid_body, collider);
+    viewer.set_initial_body_color(character_handle, Color::new(0.8, 0.1, 0.1, 1.0));
+
+    /*
+     * Create the cubes
+     */
+    let num = 8;
+    let rad = 0.1;
+
+    let shift = rad * 2.0;
+    let centerx = shift * (num / 2) as f32;
+    let centery = rad;
+
+    for j in 0usize..4 {
+        for i in 0..num {
+            let x = i as f32 * shift - centerx;
+            let y = j as f32 * shift + centery;
+
+            let rigid_body = RigidBodyBuilder::dynamic().translation(Vector::new(x, y));
+            let collider = ColliderBuilder::cuboid(rad, rad);
+            let _ = world.insert(rigid_body, collider);
+        }
+    }
+
+    /*
+     * Create some stairs.
+     */
+    let stair_width = 1.0;
+    let stair_height = 0.1;
+    for i in 0..10 {
+        let x = i as f32 * stair_width / 2.0;
+        let y = i as f32 * stair_height * 1.5 + 3.0;
+
+        let collider = ColliderBuilder::cuboid(stair_width / 2.0, stair_height / 2.0)
+            .translation(Vector::new(x, y));
+        world.insert_collider(collider, None);
+    }
+
+    /*
+     * Create a slope we can climb.
+     */
+    let slope_angle = 0.2;
+    let slope_size = 2.0;
+    let collider = ColliderBuilder::cuboid(slope_size, ground_height)
+        .translation(Vector::new(ground_size + slope_size, -ground_height + 0.4))
+        .rotation(slope_angle);
+    world.insert_collider(collider, None);
+
+    /*
+     * Create a slope we can't climb.
+     */
+    let impossible_slope_angle = 0.9;
+    let impossible_slope_size = 2.0;
+    let collider = ColliderBuilder::cuboid(slope_size, ground_height)
+        .translation(Vector::new(
+            ground_size + slope_size * 2.0 + impossible_slope_size - 0.9,
+            -ground_height + 2.3,
+        ))
+        .rotation(impossible_slope_angle);
+    world.insert_collider(collider, None);
+
+    /*
+     * Create a wall we can't climb.
+     */
+    let wall_angle = PI / 2.;
+    let wall_size = 2.0;
+    let wall_pos = Vector::new(
+        ground_size + slope_size * 2.0 + impossible_slope_size + 0.35,
+        -ground_height + 2.5 * 2.3,
+    );
+    let collider = ColliderBuilder::cuboid(wall_size, ground_height)
+        .translation(wall_pos)
+        .rotation(wall_angle);
+    world.insert_collider(collider, None);
+
+    let collider = ColliderBuilder::cuboid(wall_size, ground_height).translation(wall_pos);
+    world.insert_collider(collider, None);
+
+    /*
+     * Create a moving platform.
+     */
+    let body = RigidBodyBuilder::kinematic_velocity_based().translation(Vector::new(-8.0, 0.0));
+    // .rotation(-0.3);
+    let collider = ColliderBuilder::cuboid(2.0, ground_height);
+    let (platform_handle, _) = world.insert(body, collider);
+
+    /*
+     * More complex ground.
+     */
+    let ground_size = Vector::new(10.0, 1.0);
+    let nsubdivs = 20;
+
+    let heights = (0..nsubdivs + 1)
+        .map(|i| (i as f32 * ground_size.x / (nsubdivs as f32) / 2.0).cos() * 1.5)
+        .collect();
+
+    let collider =
+        ColliderBuilder::heightfield(heights, ground_size).translation(Vector::new(-8.0, 5.0));
+    world.insert_collider(collider, None);
+
+    /*
+     * A tilting dynamic body with a limited joint.
+     */
+    let ground = RigidBodyBuilder::fixed().translation(Vector::new(0.0, 5.0));
+    let ground_handle = world.insert_body(ground);
+    let body = RigidBodyBuilder::dynamic().translation(Vector::new(0.0, 5.0));
+    let collider = ColliderBuilder::cuboid(1.0, 0.1);
+    let (handle, _) = world.insert(body, collider);
+    let joint = RevoluteJointBuilder::new().limits([-0.3, 0.3]);
+    world.insert_impulse_joint(ground_handle, handle, joint);
+
+    /*
+     * Callback to update the character based on user inputs.
+     */
+    let mut control_mode = CharacterControlMode::Kinematic(0.1);
+    let mut controller = KinematicCharacterController {
+        max_slope_climb_angle: impossible_slope_angle - 0.02,
+        min_slope_slide_angle: impossible_slope_angle - 0.02,
+        slide: true,
+        ..Default::default()
+    };
+    let mut pid = PidController::default();
+
+    /*
+     * Set up the testbed.
+     */
+    viewer.set_world(&mut world);
+    viewer.look_at(Vec2::new(0.0, 1.0), 100.0);
+
+    let mut step_id = 0usize;
+    while viewer.render_frame(&mut world).await {
+        if viewer.simulating() {
+            world.step();
+            step_id += 1;
+
+            // Move the platform.
+            let linvel = Vector::new(
+                ((step_id as f32 * world.integration_parameters.dt) * 2.0).sin() * 2.0,
+                ((step_id as f32 * world.integration_parameters.dt) * 5.0).sin() * 1.5,
+            );
+            // let angvel = (step_id as f32 * world.integration_parameters.dt as f32).sin() * 0.5;
+
+            // Update the velocity-based kinematic body by setting its velocity.
+            if let Some(platform) = world.bodies.get_mut(platform_handle) {
+                platform.set_linvel(linvel, true);
+                // NOTE: interaction with rotating platforms isn't handled very well yet.
+                // platform.set_angvel(angvel, true);
+            }
+
+            // Update the character based on user inputs.
+            character::update_character(
+                viewer,
+                &mut world,
+                &mut control_mode,
+                &mut controller,
+                &mut pid,
+                character_handle,
+            );
+        }
+    }
+
+    Ok(())
+}

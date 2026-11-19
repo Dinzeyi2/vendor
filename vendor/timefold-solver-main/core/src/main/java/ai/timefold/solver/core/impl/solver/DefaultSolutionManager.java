@@ -1,0 +1,180 @@
+package ai.timefold.solver.core.impl.solver;
+
+import java.util.Collections;
+import java.util.List;
+import java.util.Objects;
+import java.util.function.BiFunction;
+import java.util.function.Function;
+
+import ai.timefold.solver.core.api.domain.solution.PlanningSolution;
+import ai.timefold.solver.core.api.domain.variable.InconsistentSolutionException;
+import ai.timefold.solver.core.api.score.Score;
+import ai.timefold.solver.core.api.score.analysis.ScoreAnalysis;
+import ai.timefold.solver.core.api.score.analysis.VariableLoop;
+import ai.timefold.solver.core.api.solver.RecommendedAssignment;
+import ai.timefold.solver.core.api.solver.ScoreAnalysisFetchPolicy;
+import ai.timefold.solver.core.api.solver.SolutionManager;
+import ai.timefold.solver.core.api.solver.SolutionUpdatePolicy;
+import ai.timefold.solver.core.api.solver.SolverFactory;
+import ai.timefold.solver.core.api.solver.SolverManager;
+import ai.timefold.solver.core.config.solver.EnvironmentMode;
+import ai.timefold.solver.core.config.solver.PreviewFeature;
+import ai.timefold.solver.core.enterprise.TimefoldSolverEnterpriseService;
+import ai.timefold.solver.core.impl.domain.variable.violation.VariableSnapshotTotal;
+import ai.timefold.solver.core.impl.score.constraint.ConstraintMatchPolicy;
+import ai.timefold.solver.core.impl.score.director.InnerScoreDirector;
+import ai.timefold.solver.core.impl.score.director.ScoreDirectorFactory;
+import ai.timefold.solver.core.preview.api.domain.solution.diff.PlanningSolutionDiff;
+
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
+
+/**
+ * @param <Solution_> the solution type, the class with the {@link PlanningSolution} annotation
+ */
+@NullMarked
+public final class DefaultSolutionManager<Solution_, Score_ extends Score<Score_>>
+        implements SolutionManager<Solution_, Score_> {
+
+    private final DefaultSolverFactory<Solution_> solverFactory;
+    private final ScoreDirectorFactory<Solution_, Score_> scoreDirectorFactory;
+
+    public DefaultSolutionManager(SolverManager<Solution_> solverManager) {
+        this(((DefaultSolverManager<Solution_>) solverManager).getSolverFactory());
+    }
+
+    public DefaultSolutionManager(SolverFactory<Solution_> solverFactory) {
+        this.solverFactory = ((DefaultSolverFactory<Solution_>) solverFactory);
+        this.scoreDirectorFactory = this.solverFactory.getScoreDirectorFactory();
+    }
+
+    public ScoreDirectorFactory<Solution_, Score_> getScoreDirectorFactory() {
+        return scoreDirectorFactory;
+    }
+
+    @Override
+    public Score_ update(Solution_ solution, SolutionUpdatePolicy solutionUpdatePolicy) {
+        if (solutionUpdatePolicy == SolutionUpdatePolicy.NO_UPDATE) {
+            throw new IllegalArgumentException(
+                    "Cannot call %s.update() with this solutionUpdatePolicy (%s), since it would do nothing."
+                            .formatted(this.getClass().getSimpleName(), solutionUpdatePolicy));
+        }
+        return callScoreDirector("Solution update", solution, solutionUpdatePolicy,
+                (s, inconsistentEntities) -> s.getSolutionDescriptor().getScore(s.getWorkingSolution()),
+                ConstraintMatchPolicy.DISABLED, false, false);
+    }
+
+    private <Result_> Result_ callScoreDirector(String feature, Solution_ solution, SolutionUpdatePolicy solutionUpdatePolicy,
+            BiFunction<InnerScoreDirector<Solution_, Score_>, List<VariableLoop>, Result_> function,
+            ConstraintMatchPolicy constraintMatchPolicy,
+            boolean cloneSolution, boolean handlesStructurallyFlawedSolutions) {
+        var isShadowVariableUpdateEnabled = solutionUpdatePolicy.isShadowVariableUpdateEnabled();
+        var nonNullSolution = Objects.requireNonNull(solution);
+        try (var scoreDirector = getScoreDirectorFactory().createScoreDirectorBuilder().withLookUpEnabled(cloneSolution)
+                .withConstraintMatchPolicy(constraintMatchPolicy)
+                .withExpectShadowVariablesInCorrectState(!isShadowVariableUpdateEnabled)
+                .withForceAllowInconsistentSolutions(handlesStructurallyFlawedSolutions)
+                .build()) {
+            nonNullSolution = cloneSolution ? scoreDirector.cloneSolution(nonNullSolution) : nonNullSolution;
+            if (isShadowVariableUpdateEnabled) {
+                scoreDirector.setWorkingSolution(nonNullSolution);
+            } else {
+                // Some notifiables resetWorkingSolution update shadow variables
+                var oldSnapshot =
+                        VariableSnapshotTotal.takeSnapshot(scoreDirectorFactory.getSolutionDescriptor(), nonNullSolution);
+                scoreDirector.setWorkingSolutionWithoutUpdatingShadows(nonNullSolution);
+                oldSnapshot.restore();
+            }
+            if (constraintMatchPolicy.isEnabled() && !scoreDirector.getConstraintMatchPolicy().isEnabled()) {
+                throw new IllegalStateException("""
+                        Requested constraint matching but score director doesn't support it.
+                        Maybe use Constraint Streams instead of Easy or Incremental score calculator?""");
+            }
+
+            // if handlesStructurallyFlawedSolutions is true, then the score can never be structurally flawed
+            // and all variable updates will be successful
+            List<VariableLoop> inconsistentEntities = null;
+            if (solutionUpdatePolicy.isScoreUpdateEnabled()) {
+                var score = scoreDirector.calculateScore();
+                if (score.isStructurallyFlawed()) {
+                    inconsistentEntities = scoreDirector.computeVariableLoops();
+                    throw new InconsistentSolutionException(feature, nonNullSolution, inconsistentEntities);
+                }
+                if (handlesStructurallyFlawedSolutions) {
+                    inconsistentEntities = scoreDirector.computeVariableLoops();
+                    if (!inconsistentEntities.isEmpty()) {
+                        scoreDirector.getSolutionDescriptor().setScore(
+                                scoreDirector.getWorkingSolution(),
+                                scoreDirector.getScoreDefinition().getStructurallyFlawedScore()
+                                        .add(score.raw()));
+                    }
+                }
+            } else if (!scoreDirector.isLastVariableUpdateSuccessful()) {
+                inconsistentEntities = scoreDirector.computeVariableLoops();
+                throw new InconsistentSolutionException(feature, nonNullSolution, inconsistentEntities);
+            }
+
+            if (inconsistentEntities == null) {
+                inconsistentEntities = (handlesStructurallyFlawedSolutions) ? scoreDirector.computeVariableLoops()
+                        : Collections.emptyList();
+            }
+
+            return function.apply(scoreDirector, inconsistentEntities);
+        }
+    }
+
+    private void assertFreshScore(Solution_ solution, Score_ currentScore, Score_ calculatedScore,
+            SolutionUpdatePolicy solutionUpdatePolicy) {
+        if (!solutionUpdatePolicy.isScoreUpdateEnabled()) {
+            // Score update is not enabled; this means the score is supposed to be valid.
+            // Yet it is different from a freshly calculated score, suggesting previous score corruption.
+            if (!Objects.equals(currentScore, calculatedScore)) {
+                throw new IllegalStateException("""
+                        Current score (%s) and freshly calculated score (%s) for solution (%s) do not match.
+                        Maybe run %s environment mode to check for score corruptions.
+                        Otherwise enable %s.%s to update the stale score.
+                        """.formatted(currentScore, calculatedScore, solution, EnvironmentMode.TRACKED_FULL_ASSERT,
+                        SolutionUpdatePolicy.class.getSimpleName(), SolutionUpdatePolicy.UPDATE_ALL));
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    @Override
+    public ScoreAnalysis<Score_> analyze(Solution_ solution, ScoreAnalysisFetchPolicy fetchPolicy,
+            SolutionUpdatePolicy solutionUpdatePolicy) {
+        Objects.requireNonNull(fetchPolicy, "fetchPolicy");
+        var enterpriseService =
+                TimefoldSolverEnterpriseService.loadOrFail(TimefoldSolverEnterpriseService.Feature.SCORE_ANALYSIS);
+        var currentScore = (Score_) scoreDirectorFactory.getSolutionDescriptor().getScore(solution);
+        var analysis = callScoreDirector("Score analysis", solution, solutionUpdatePolicy,
+                (scoreDirector, inconsistentEntities) -> enterpriseService.analyze(scoreDirector.calculateScore(),
+                        scoreDirector.getConstraintMatchTotalMap(), inconsistentEntities,
+                        scoreDirector.getScoreDefinition(), fetchPolicy),
+                ConstraintMatchPolicy.match(fetchPolicy), false, true);
+        assertFreshScore(solution, currentScore, analysis.score(), solutionUpdatePolicy);
+        return analysis;
+    }
+
+    @Override
+    public PlanningSolutionDiff<Solution_> diff(Solution_ oldSolution, Solution_ newSolution) {
+        var enterpriseService =
+                TimefoldSolverEnterpriseService.loadOrFail(TimefoldSolverEnterpriseService.Feature.RECOMMENDATIONS);
+        solverFactory.ensurePreviewFeature(PreviewFeature.PLANNING_SOLUTION_DIFF);
+        return enterpriseService.solutionDiff(solverFactory.getSolutionDescriptor().getMetaModel(), oldSolution, newSolution);
+    }
+
+    @Override
+    public <In_, Out_> List<RecommendedAssignment<Out_, Score_>> recommendAssignment(Solution_ solution,
+            In_ evaluatedEntityOrElement, Function<In_, @Nullable Out_> propositionFunction,
+            ScoreAnalysisFetchPolicy fetchPolicy) {
+        var enterpriseService =
+                TimefoldSolverEnterpriseService.loadOrFail(TimefoldSolverEnterpriseService.Feature.RECOMMENDATIONS);
+        return callScoreDirector("Recommended assignment",
+                solution, SolutionUpdatePolicy.UPDATE_ALL,
+                (scoreDirector, inconsistentEntities) -> enterpriseService.buildRecommender(solverFactory, solution,
+                        evaluatedEntityOrElement, propositionFunction, fetchPolicy).apply((InnerScoreDirector) scoreDirector),
+                ConstraintMatchPolicy.match(fetchPolicy), true, false);
+    }
+
+}

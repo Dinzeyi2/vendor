@@ -1,0 +1,89 @@
+package ai.timefold.solver.core.impl.io.jaxb;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
+
+import java.io.StringReader;
+import java.io.StringWriter;
+import java.util.Objects;
+
+import jakarta.xml.bind.annotation.XmlAttribute;
+import jakarta.xml.bind.annotation.XmlRootElement;
+import jakarta.xml.bind.annotation.XmlValue;
+
+import org.junit.jupiter.api.Test;
+import org.xml.sax.SAXParseException;
+
+class GenericJaxbIOTest {
+
+    private final GenericJaxbIO<DummyJaxbClass> xmlIO = new GenericJaxbIO<>(DummyJaxbClass.class);
+
+    @Test
+    void readWriteSimpleObject() {
+        DummyJaxbClass original = new DummyJaxbClass(1, "");
+
+        StringWriter stringWriter = new StringWriter();
+        xmlIO.write(original, stringWriter);
+
+        DummyJaxbClass marshalledObject = xmlIO.read(new StringReader(stringWriter.toString()));
+        assertThat(marshalledObject).isEqualTo(original);
+    }
+
+    @Test
+    void readThrowsExceptionOnInvalidXml() {
+        String invalidXml = "<unknownRootElement/>";
+        StringReader stringReader = new StringReader(invalidXml);
+        assertThatExceptionOfType(TimefoldXmlSerializationException.class).isThrownBy(() -> xmlIO.read(stringReader));
+    }
+
+    @Test
+    void readOverridingNamespaceIsProtectedFromXXE() {
+        String maliciousXml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                + "<!DOCTYPE dummyJaxbClass [  \n"
+                + "  <!ELEMENT dummyJaxbClass ANY >\n"
+                + "  <!ENTITY xxe SYSTEM \"file:///etc/passwd\" >]"
+                + ">"
+                + "<dummyJaxbClass>&xxe;</dummyJaxbClass>";
+        assertThatExceptionOfType(TimefoldXmlSerializationException.class)
+                .isThrownBy(() -> xmlIO.readOverridingNamespace(new StringReader(maliciousXml)))
+                .withRootCauseExactlyInstanceOf(SAXParseException.class)
+                .withStackTraceContaining("disallow-doctype-decl");
+    }
+
+    @XmlRootElement
+    private static class DummyJaxbClass {
+
+        // This field is used only for evaluating the XXE attack protection.
+        @XmlValue
+        private String value;
+
+        @XmlAttribute
+        private int id;
+
+        private DummyJaxbClass() {
+            // Required by JAXB
+        }
+
+        private DummyJaxbClass(int id, String value) {
+            this.id = id;
+            this.value = value;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (!(o instanceof DummyJaxbClass)) {
+                return false;
+            }
+            DummyJaxbClass that = (DummyJaxbClass) o;
+            return id == that.id;
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(id);
+        }
+    }
+}

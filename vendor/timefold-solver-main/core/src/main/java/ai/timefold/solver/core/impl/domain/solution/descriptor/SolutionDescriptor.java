@@ -1,0 +1,1086 @@
+package ai.timefold.solver.core.impl.domain.solution.descriptor;
+
+import static ai.timefold.solver.core.impl.domain.common.accessor.MemberAccessorType.FIELD_OR_GETTER_METHOD;
+import static ai.timefold.solver.core.impl.domain.common.accessor.MemberAccessorType.FIELD_OR_READ_METHOD;
+import static ai.timefold.solver.core.impl.domain.entity.descriptor.EntityDescriptor.extractInheritedClasses;
+import static java.util.stream.Stream.concat;
+
+import java.lang.annotation.Annotation;
+import java.lang.reflect.AnnotatedElement;
+import java.lang.reflect.Field;
+import java.lang.reflect.Member;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.EnumSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.SequencedCollection;
+import java.util.SequencedMap;
+import java.util.SequencedSet;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.function.Consumer;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import ai.timefold.solver.core.api.domain.entity.PlanningEntity;
+import ai.timefold.solver.core.api.domain.solution.ConstraintWeightOverrides;
+import ai.timefold.solver.core.api.domain.solution.PlanningEntityCollectionProperty;
+import ai.timefold.solver.core.api.domain.solution.PlanningEntityProperty;
+import ai.timefold.solver.core.api.domain.solution.PlanningScore;
+import ai.timefold.solver.core.api.domain.solution.PlanningSolution;
+import ai.timefold.solver.core.api.domain.solution.ProblemFactCollectionProperty;
+import ai.timefold.solver.core.api.domain.solution.ProblemFactProperty;
+import ai.timefold.solver.core.api.domain.solution.cloner.SolutionCloner;
+import ai.timefold.solver.core.api.domain.valuerange.ValueRangeProvider;
+import ai.timefold.solver.core.api.score.Score;
+import ai.timefold.solver.core.config.solver.PreviewFeature;
+import ai.timefold.solver.core.config.util.ConfigUtils;
+import ai.timefold.solver.core.impl.domain.common.DomainAccessType;
+import ai.timefold.solver.core.impl.domain.common.LookupStrategyResolver;
+import ai.timefold.solver.core.impl.domain.common.ReflectionHelper;
+import ai.timefold.solver.core.impl.domain.common.accessor.MemberAccessor;
+import ai.timefold.solver.core.impl.domain.common.accessor.MemberAccessorFactory;
+import ai.timefold.solver.core.impl.domain.common.accessor.ReflectionFieldMemberAccessor;
+import ai.timefold.solver.core.impl.domain.entity.descriptor.EntityDescriptor;
+import ai.timefold.solver.core.impl.domain.policy.DescriptorPolicy;
+import ai.timefold.solver.core.impl.domain.score.descriptor.ScoreDescriptor;
+import ai.timefold.solver.core.impl.domain.solution.cloner.FieldAccessingSolutionCloner;
+import ai.timefold.solver.core.impl.domain.solution.cloner.gizmo.GizmoSolutionCloner;
+import ai.timefold.solver.core.impl.domain.solution.cloner.gizmo.GizmoSolutionClonerFactory;
+import ai.timefold.solver.core.impl.domain.variable.declarative.DeclarativeShadowVariableDescriptor;
+import ai.timefold.solver.core.impl.domain.variable.declarative.ShadowVariablesInconsistentVariableDescriptor;
+import ai.timefold.solver.core.impl.domain.variable.descriptor.BasicVariableDescriptor;
+import ai.timefold.solver.core.impl.domain.variable.descriptor.GenuineVariableDescriptor;
+import ai.timefold.solver.core.impl.domain.variable.descriptor.ListVariableDescriptor;
+import ai.timefold.solver.core.impl.domain.variable.descriptor.VariableDescriptor;
+import ai.timefold.solver.core.impl.score.definition.ScoreDefinition;
+import ai.timefold.solver.core.impl.score.director.ScoreDirector;
+import ai.timefold.solver.core.impl.util.MutableInt;
+import ai.timefold.solver.core.impl.util.MutableLong;
+import ai.timefold.solver.core.preview.api.domain.metamodel.GenuineEntityMetaModel;
+import ai.timefold.solver.core.preview.api.domain.metamodel.PlanningSolutionMetaModel;
+
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * @param <Solution_> the solution type, the class with the {@link PlanningSolution} annotation
+ */
+@NullMarked
+public final class SolutionDescriptor<Solution_> {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(SolutionDescriptor.class);
+    private static final EntityDescriptor<?> NULL_ENTITY_DESCRIPTOR = new EntityDescriptor<>(-1, null, PlanningEntity.class);
+    private static final Class[] ANNOTATED_MEMBERS_CLASSES = { ProblemFactCollectionProperty.class, ValueRangeProvider.class,
+            PlanningEntityCollectionProperty.class, PlanningScore.class };
+
+    public static <Solution_> SolutionDescriptor<Solution_> buildSolutionDescriptor(Class<Solution_> solutionClass,
+            Class<?>... entityClasses) {
+        return buildSolutionDescriptor(solutionClass, Arrays.asList(entityClasses));
+    }
+
+    public static <Solution_> SolutionDescriptor<Solution_> buildSolutionDescriptor(Class<Solution_> solutionClass,
+            List<Class<?>> entityClassList) {
+        return buildSolutionDescriptor(EnumSet.noneOf(PreviewFeature.class), solutionClass, entityClassList);
+    }
+
+    public static <Solution_> SolutionDescriptor<Solution_> buildSolutionDescriptor(
+            Set<PreviewFeature> enabledPreviewFeaturesSet, Class<Solution_> solutionClass, Class<?>... entityClasses) {
+        return buildSolutionDescriptor(enabledPreviewFeaturesSet, solutionClass, List.of(entityClasses));
+    }
+
+    public static <Solution_> SolutionDescriptor<Solution_> buildSolutionDescriptor(
+            Set<PreviewFeature> enabledPreviewFeaturesSet, Class<Solution_> solutionClass, List<Class<?>> entityClassList) {
+        return buildSolutionDescriptor(enabledPreviewFeaturesSet, DomainAccessType.FORCE_REFLECTION, solutionClass, null, null,
+                entityClassList);
+    }
+
+    public static <Solution_> SolutionDescriptor<Solution_> buildSolutionDescriptor(
+            @Nullable Set<PreviewFeature> enabledPreviewFeatureSet, DomainAccessType domainAccessType,
+            Class<Solution_> solutionClass,
+            @Nullable Map<String, MemberAccessor> memberAccessorMap, @Nullable Map<String, SolutionCloner> solutionClonerMap,
+            List<Class<?>> entityClassList) {
+        assertMutable(solutionClass, "solutionClass");
+        assertSingleInheritance(solutionClass);
+        assertValidAnnotatedMembers(solutionClass);
+        solutionClonerMap = Objects.requireNonNullElse(solutionClonerMap, Collections.emptyMap());
+        var solutionDescriptor = new SolutionDescriptor<>(solutionClass, memberAccessorMap);
+        var descriptorPolicy = new DescriptorPolicy();
+        if (enabledPreviewFeatureSet != null) {
+            descriptorPolicy.setEnabledPreviewFeatureSet(enabledPreviewFeatureSet);
+        }
+        descriptorPolicy.setDomainAccessType(domainAccessType);
+        descriptorPolicy.setGeneratedSolutionClonerMap(solutionClonerMap);
+        descriptorPolicy.setMemberAccessorFactory(solutionDescriptor.getMemberAccessorFactory());
+
+        solutionDescriptor.processUnannotatedFieldsAndMethods(descriptorPolicy);
+        solutionDescriptor.processAnnotations(descriptorPolicy);
+        // Before iterating over the entity classes, we need to read the inheritance chain, add all parent and child classes,
+        // and sort them.
+        var updatedEntityClassList = new ArrayList<>(entityClassList);
+        for (var entityClass : entityClassList) {
+            var inheritedEntityClasses = extractInheritedClasses(entityClass);
+            var filteredInheritedEntityClasses = inheritedEntityClasses.stream()
+                    .filter(c -> !updatedEntityClassList.contains(c))
+                    .toList();
+            updatedEntityClassList.addAll(filteredInheritedEntityClasses);
+        }
+        for (var entityClass : sortEntityClassList(updatedEntityClassList)) {
+            var entityDescriptor = descriptorPolicy.buildEntityDescriptor(solutionDescriptor, entityClass);
+            entityDescriptor.processAnnotations(descriptorPolicy);
+        }
+        solutionDescriptor.afterAnnotationsProcessed(descriptorPolicy);
+        return solutionDescriptor;
+    }
+
+    public static void assertMutable(Class<?> clz, String classType) {
+        if (clz.isRecord()) {
+            throw new IllegalArgumentException("""
+                    The %s (%s) cannot be a record as it needs to be mutable.
+                    Use a regular class instead.""".formatted(classType, clz.getCanonicalName()));
+        } else if (clz.isEnum()) {
+            throw new IllegalArgumentException("""
+                    The %s (%s) cannot be an enum as it needs to be mutable.
+                    Use a regular class instead.""".formatted(classType, clz.getCanonicalName()));
+        }
+    }
+
+    /**
+     * If a class declares any annotated member, it must be annotated as a solution,
+     * even if a supertype already has the annotation.
+     */
+    private static void assertValidAnnotatedMembers(Class<?> clazz) {
+        // We first check the entity class
+        if (clazz.getAnnotation(PlanningSolution.class) == null && hasAnyAnnotatedMembers(clazz)) {
+            var annotatedMembers = extractAnnotatedMembers(clazz).stream()
+                    .map(Member::getName)
+                    .toList();
+            throw new IllegalStateException("""
+                    The class %s is not annotated with @PlanningSolution but defines annotated members.
+                    Maybe annotate %s with @PlanningSolution.
+                    Maybe remove the annotated members (%s).""".formatted(clazz.getName(), clazz.getName(), annotatedMembers));
+        }
+        // We check the first level of the inheritance chain
+        var otherClazz = clazz.getSuperclass();
+        if (otherClazz != null && otherClazz.getAnnotation(PlanningSolution.class) == null
+                && hasAnyAnnotatedMembers(otherClazz)) {
+            var annotatedMembers = extractAnnotatedMembers(otherClazz).stream()
+                    .map(Member::getName)
+                    .toList();
+            throw new IllegalStateException("""
+                    The class %s is not annotated with @PlanningSolution but defines annotated members.
+                    Maybe annotate %s with @PlanningSolution.
+                    Maybe remove the annotated members (%s).""".formatted(otherClazz.getName(), otherClazz.getName(),
+                    annotatedMembers));
+        }
+    }
+
+    private static void assertSingleInheritance(Class<?> solutionClass) {
+        var inheritedClassList =
+                ConfigUtils.getAllAnnotatedLineageClasses(solutionClass.getSuperclass(), PlanningSolution.class);
+        if (inheritedClassList.size() > 1) {
+            throw new IllegalStateException("""
+                    The class %s inherits its @%s annotation from multiple classes (%s).
+                    Remove solution class(es) from the inheritance chain to create a single-level inheritance structure."""
+                    .formatted(solutionClass.getName(), PlanningSolution.class.getSimpleName(), inheritedClassList));
+        }
+    }
+
+    private static List<Class<?>> sortEntityClassList(List<Class<?>> entityClassList) {
+        var sortedEntityClassList = new ArrayList<Class<?>>(entityClassList.size());
+        for (var entityClass : entityClassList) {
+            var added = false;
+            for (var i = 0; i < sortedEntityClassList.size(); i++) {
+                var sortedEntityClass = sortedEntityClassList.get(i);
+                if (entityClass.isAssignableFrom(sortedEntityClass)) {
+                    sortedEntityClassList.add(i, entityClass);
+                    added = true;
+                    break;
+                }
+            }
+            if (!added) {
+                sortedEntityClassList.add(entityClass);
+            }
+        }
+        return sortedEntityClassList;
+    }
+
+    private static List<Member> extractAnnotatedMembers(Class<?> solutionClass) {
+        var membersList = ConfigUtils.getDeclaredMembers(solutionClass);
+        return membersList.stream()
+                .filter(member -> !ConfigUtils.extractAnnotationClasses(member, ANNOTATED_MEMBERS_CLASSES).isEmpty())
+                .toList();
+    }
+
+    private static boolean hasAnyAnnotatedMembers(Class<?> solutionClass) {
+        return !extractAnnotatedMembers(solutionClass).isEmpty();
+    }
+
+    private final Class<Solution_> solutionClass;
+    private final MemberAccessorFactory memberAccessorFactory;
+
+    private final SequencedMap<String, MemberAccessor> problemFactMemberAccessorMap = new LinkedHashMap<>();
+    private final SequencedMap<String, MemberAccessor> problemFactCollectionMemberAccessorMap = new LinkedHashMap<>();
+    private final SequencedMap<String, MemberAccessor> entityMemberAccessorMap = new LinkedHashMap<>();
+    private final SequencedMap<String, MemberAccessor> entityCollectionMemberAccessorMap = new LinkedHashMap<>();
+
+    @Nullable
+    private ConstraintWeightSupplier<Solution_, ?> constraintWeightSupplier;
+    private final SequencedMap<Class<?>, EntityDescriptor<Solution_>> entityDescriptorMap = new LinkedHashMap<>();
+    private final List<Class<?>> reversedEntityClassList = new ArrayList<>();
+    private final ConcurrentMap<Class<?>, EntityDescriptor<Solution_>> lowestEntityDescriptorMap = new ConcurrentHashMap<>();
+    private final ConcurrentMap<Class<?>, MemberAccessor> planningIdMemberAccessorMap = new ConcurrentHashMap<>();
+
+    // Lazily initialized fields
+    @Nullable
+    private SequencedSet<Class<?>> problemFactOrEntityClassSet;
+    @Nullable
+    private ScoreDescriptor<?> scoreDescriptor;
+    @Nullable
+    private DomainAccessType domainAccessType;
+    @Nullable
+    private LookupStrategyResolver lookUpStrategyResolver;
+    @Nullable
+    private PlanningSolutionMetaModel<Solution_> planningSolutionMetaModel;
+    @Nullable
+    private SolutionCloner<Solution_> solutionCloner;
+    @Nullable
+    private List<EntityDescriptor<Solution_>> genuineEntityDescriptorList;
+    @Nullable
+    private List<BasicVariableDescriptor<Solution_>> basicVariableDescriptorList;
+    @Nullable
+    private ListVariableDescriptor<Solution_> listVariableDescriptor;
+    @Nullable
+    private List<DeclarativeShadowVariableDescriptor<Solution_>> declarativeShadowVariableDescriptorList;
+
+    // ************************************************************************
+    // Constructors and simple getters/setters
+    // ************************************************************************
+
+    private SolutionDescriptor(Class<Solution_> solutionClass, @Nullable Map<String, MemberAccessor> memberAccessorMap) {
+        this.solutionClass = solutionClass;
+        if (solutionClass.getPackage() == null) {
+            LOGGER.warn("The solutionClass ({}) should be in a proper java package.", solutionClass);
+        }
+        this.memberAccessorFactory = new MemberAccessorFactory(memberAccessorMap);
+    }
+
+    public void addEntityDescriptor(EntityDescriptor<Solution_> entityDescriptor) {
+        var entityClass = entityDescriptor.getEntityClass();
+        for (var otherEntityClass : entityDescriptorMap.keySet()) {
+            if (entityClass.isAssignableFrom(otherEntityClass)) {
+                throw new IllegalArgumentException("""
+                        An earlier entityClass (%s) should not be a subclass of a later entityClass (%s).
+                        Switch their declaration so superclasses are defined earlier."""
+                        .formatted(otherEntityClass, entityClass));
+            }
+        }
+        entityDescriptorMap.put(entityClass, entityDescriptor);
+        reversedEntityClassList.addFirst(entityClass);
+        lowestEntityDescriptorMap.put(entityClass, entityDescriptor);
+    }
+
+    public void processUnannotatedFieldsAndMethods(DescriptorPolicy descriptorPolicy) {
+        processConstraintWeights(descriptorPolicy);
+    }
+
+    private void processConstraintWeights(DescriptorPolicy descriptorPolicy) {
+        for (var lineageClass : ConfigUtils.getAllParents(solutionClass)) {
+            var memberList = ConfigUtils.getDeclaredMembers(lineageClass);
+            var constraintWeightFieldList = memberList.stream()
+                    .flatMap(member -> {
+                        if (member instanceof Field field
+                                && ConstraintWeightOverrides.class.isAssignableFrom(field.getType())) {
+                            return Stream.of(field);
+                        } else {
+                            return Stream.empty();
+                        }
+                    }).toList();
+            switch (constraintWeightFieldList.size()) {
+                case 0 -> {
+                    // Do nothing.
+                }
+                case 1 -> {
+                    if (constraintWeightSupplier != null) {
+                        // The bottom-most class wins, they are parsed first due to ConfigUtil.getAllParents().
+                        throw new IllegalStateException(
+                                "The solutionClass (%s) has a field of type (%s) which was already found on its parent class."
+                                        .formatted(lineageClass, ConstraintWeightOverrides.class));
+                    }
+                    constraintWeightSupplier = ConstraintWeightSupplier.create(this, descriptorPolicy,
+                            constraintWeightFieldList.getFirst());
+                }
+                default ->
+                    throw new IllegalStateException("The solutionClass (%s) has more than one field (%s) of type %s."
+                            .formatted(solutionClass, constraintWeightFieldList, ConstraintWeightOverrides.class));
+            }
+        }
+    }
+
+    public void processAnnotations(DescriptorPolicy descriptorPolicy) {
+        domainAccessType = descriptorPolicy.getDomainAccessType();
+        processSolutionAnnotations(descriptorPolicy);
+        var potentiallyOverwritingMethodList = new ArrayList<Method>();
+        // Iterate inherited members too
+        var lineageClassList = ConfigUtils.getAllAnnotatedLineageClasses(solutionClass, PlanningSolution.class);
+        if (lineageClassList.isEmpty() && solutionClass.getSuperclass().isAnnotationPresent(PlanningSolution.class)) {
+            lineageClassList = ConfigUtils.getAllAnnotatedLineageClasses(solutionClass.getSuperclass(), PlanningSolution.class);
+        }
+        for (var lineageClass : lineageClassList) {
+            var memberList = ConfigUtils.getDeclaredMembers(lineageClass);
+            for (var member : memberList) {
+                if (member instanceof Method method
+                        && potentiallyOverwritingMethodList.stream().anyMatch(m -> member.getName().equals(m.getName()) // Shortcut to discard negatives faster
+                                && ReflectionHelper.isMethodOverwritten(method, m.getDeclaringClass()))) {
+                    // Ignore member because it is an overwritten method
+                    continue;
+                }
+                processValueRangeProviderAnnotation(descriptorPolicy, member);
+                processFactEntityOrScoreAnnotation(descriptorPolicy, member);
+            }
+            potentiallyOverwritingMethodList.ensureCapacity(potentiallyOverwritingMethodList.size() + memberList.size());
+            memberList.stream().filter(Method.class::isInstance)
+                    .forEach(member -> potentiallyOverwritingMethodList.add((Method) member));
+        }
+        if (entityCollectionMemberAccessorMap.isEmpty() && entityMemberAccessorMap.isEmpty()) {
+            throw new IllegalStateException(
+                    "The solutionClass (%s) must have at least 1 member with a %s annotation or a %s annotation.".formatted(
+                            solutionClass, PlanningEntityCollectionProperty.class.getSimpleName(),
+                            PlanningEntityProperty.class.getSimpleName()));
+        }
+        // Do not check if problemFactCollectionMemberAccessorMap and problemFactMemberAccessorMap are empty
+        // because they are only required for ConstraintStreams.
+        if (scoreDescriptor == null) {
+            throw new IllegalStateException("""
+                    The solutionClass (%s) must have 1 member with a @%s annotation.
+                    Maybe add a getScore() method with a @%s annotation.""".formatted(solutionClass,
+                    PlanningScore.class.getSimpleName(), PlanningScore.class.getSimpleName()));
+        }
+    }
+
+    private void processSolutionAnnotations(DescriptorPolicy descriptorPolicy) {
+        var annotation = extractMostRelevantPlanningSolutionAnnotation();
+        var solutionClonerClass = annotation.solutionCloner();
+        if (solutionClonerClass != PlanningSolution.NullSolutionCloner.class) {
+            solutionCloner = ConfigUtils.newInstance(this::toString, "solutionClonerClass", solutionClonerClass);
+        }
+        lookUpStrategyResolver = new LookupStrategyResolver(descriptorPolicy);
+    }
+
+    private PlanningSolution extractMostRelevantPlanningSolutionAnnotation() {
+        var solutionAnnotation = solutionClass.getAnnotation(PlanningSolution.class);
+        if (solutionAnnotation != null) {
+            return solutionAnnotation;
+        }
+        var solutionSuperclass = solutionClass.getSuperclass(); // Null if interface.
+        if (solutionSuperclass == null) {
+            throw new IllegalStateException("""
+                    The solutionClass (%s) has been specified as a solution in the configuration, \
+                    but does not have a @%s annotation.""".formatted(solutionClass.getCanonicalName(),
+                    PlanningSolution.class.getSimpleName()));
+        }
+        var parentSolutionAnnotation = solutionSuperclass.getAnnotation(PlanningSolution.class);
+        if (parentSolutionAnnotation == null) {
+            throw new IllegalStateException("""
+                    The solutionClass (%s) has been specified as a solution in the configuration, \
+                    but neither it nor its superclass (%s) have a @%s annotation.""".formatted(solutionClass.getCanonicalName(),
+                    solutionSuperclass.getCanonicalName(), PlanningSolution.class.getSimpleName()));
+        }
+        return parentSolutionAnnotation;
+    }
+
+    private void processValueRangeProviderAnnotation(DescriptorPolicy descriptorPolicy, Member member) {
+        if (((AnnotatedElement) member).isAnnotationPresent(ValueRangeProvider.class)) {
+            var memberAccessor = descriptorPolicy.getMemberAccessorFactory().buildAndCacheMemberAccessor(member,
+                    FIELD_OR_READ_METHOD, ValueRangeProvider.class, descriptorPolicy.getDomainAccessType());
+            descriptorPolicy.addFromSolutionValueRangeProvider(memberAccessor);
+        }
+    }
+
+    private void processFactEntityOrScoreAnnotation(DescriptorPolicy descriptorPolicy, Member member) {
+        var annotationClass = extractFactEntityOrScoreAnnotationClass(member);
+        if (annotationClass == null) {
+            return;
+        }
+        if (annotationClass.equals(ProblemFactProperty.class) || annotationClass.equals(ProblemFactCollectionProperty.class)) {
+            processProblemFactPropertyAnnotation(descriptorPolicy, member, annotationClass);
+        } else if (annotationClass.equals(PlanningEntityProperty.class)
+                || annotationClass.equals(PlanningEntityCollectionProperty.class)) {
+            processPlanningEntityPropertyAnnotation(descriptorPolicy, member, annotationClass);
+        } else if (annotationClass.equals(PlanningScore.class)) {
+            if (scoreDescriptor == null) {
+                // Bottom class wins. Bottom classes are parsed first due to ConfigUtil.getAllAnnotatedLineageClasses().
+                scoreDescriptor = descriptorPolicy.buildScoreDescriptor(member, solutionClass);
+            } else {
+                scoreDescriptor.failFastOnDuplicateMember(descriptorPolicy, member, solutionClass);
+            }
+        }
+    }
+
+    @Nullable
+    private static Class<? extends Annotation> extractFactEntityOrScoreAnnotationClass(Member member) {
+        return ConfigUtils.extractAnnotationClass(member, ProblemFactProperty.class, ProblemFactCollectionProperty.class,
+                PlanningEntityProperty.class, PlanningEntityCollectionProperty.class, PlanningScore.class);
+    }
+
+    private void processProblemFactPropertyAnnotation(DescriptorPolicy descriptorPolicy, Member member,
+            Class<? extends Annotation> annotationClass) {
+        var memberAccessor = descriptorPolicy.getMemberAccessorFactory().buildAndCacheMemberAccessor(member,
+                FIELD_OR_READ_METHOD, annotationClass, descriptorPolicy.getDomainAccessType());
+        Class<?> problemFactType;
+        assertNoFieldAndGetterDuplicationOrConflict(memberAccessor, annotationClass);
+        if (annotationClass == ProblemFactProperty.class) {
+            problemFactMemberAccessorMap.put(memberAccessor.getName(), memberAccessor);
+            problemFactType = memberAccessor.getType();
+        } else if (annotationClass == ProblemFactCollectionProperty.class) {
+            var type = memberAccessor.getType();
+            if (!(Collection.class.isAssignableFrom(type) || type.isArray())) {
+                throw new IllegalStateException(
+                        "The solutionClass (%s) has a @%s-annotated member (%s) that does not return a %s or an array."
+                                .formatted(solutionClass, ProblemFactCollectionProperty.class.getSimpleName(), member,
+                                        Collection.class.getSimpleName()));
+            }
+            problemFactCollectionMemberAccessorMap.put(memberAccessor.getName(), memberAccessor);
+
+            if (type.isArray()) {
+                problemFactType = type.getComponentType();
+            } else {
+                problemFactType = ConfigUtils.extractGenericTypeParameterOrFail(PlanningSolution.class.getSimpleName(),
+                        memberAccessor.getDeclaringClass(), type, memberAccessor.getGenericType(), annotationClass,
+                        memberAccessor.getName());
+            }
+        } else {
+            throw new IllegalStateException("Impossible situation with annotationClass (" + annotationClass + ").");
+        }
+        if (problemFactType.isAnnotationPresent(PlanningEntity.class)) {
+            throw new IllegalStateException("""
+                    The solutionClass (%s) has a @%s-annotated member (%s) that returns a @%s.
+                    Maybe use @%s instead?""".formatted(solutionClass, annotationClass.getSimpleName(),
+                    memberAccessor.getName(), PlanningEntity.class.getSimpleName(),
+                    ((annotationClass == ProblemFactProperty.class) ? PlanningEntityProperty.class.getSimpleName()
+                            : PlanningEntityCollectionProperty.class.getSimpleName())));
+        }
+    }
+
+    private void processPlanningEntityPropertyAnnotation(DescriptorPolicy descriptorPolicy, Member member,
+            Class<? extends Annotation> annotationClass) {
+        var memberAccessor = descriptorPolicy.getMemberAccessorFactory().buildAndCacheMemberAccessor(member,
+                FIELD_OR_GETTER_METHOD, annotationClass, descriptorPolicy.getDomainAccessType());
+        assertNoFieldAndGetterDuplicationOrConflict(memberAccessor, annotationClass);
+        if (annotationClass == PlanningEntityProperty.class) {
+            entityMemberAccessorMap.put(memberAccessor.getName(), memberAccessor);
+        } else if (annotationClass == PlanningEntityCollectionProperty.class) {
+            var type = memberAccessor.getType();
+            if (!(Collection.class.isAssignableFrom(type) || type.isArray())) {
+                throw new IllegalStateException(
+                        "The solutionClass (%s) has a @%s annotated member (%s) that does not return a %s or an array."
+                                .formatted(solutionClass, PlanningEntityCollectionProperty.class.getSimpleName(), member,
+                                        Collection.class.getSimpleName()));
+            }
+            entityCollectionMemberAccessorMap.put(memberAccessor.getName(), memberAccessor);
+        } else {
+            throw new IllegalStateException("Impossible situation with annotationClass (" + annotationClass + ").");
+        }
+    }
+
+    private void assertNoFieldAndGetterDuplicationOrConflict(MemberAccessor memberAccessor,
+            Class<? extends Annotation> annotationClass) {
+        MemberAccessor duplicate;
+        Class<? extends Annotation> otherAnnotationClass;
+        var memberName = memberAccessor.getName();
+        if (problemFactMemberAccessorMap.containsKey(memberName)) {
+            duplicate = problemFactMemberAccessorMap.get(memberName);
+            otherAnnotationClass = ProblemFactProperty.class;
+        } else if (problemFactCollectionMemberAccessorMap.containsKey(memberName)) {
+            duplicate = problemFactCollectionMemberAccessorMap.get(memberName);
+            otherAnnotationClass = ProblemFactCollectionProperty.class;
+        } else if (entityMemberAccessorMap.containsKey(memberName)) {
+            duplicate = entityMemberAccessorMap.get(memberName);
+            otherAnnotationClass = PlanningEntityProperty.class;
+        } else if (entityCollectionMemberAccessorMap.containsKey(memberName)) {
+            duplicate = entityCollectionMemberAccessorMap.get(memberName);
+            otherAnnotationClass = PlanningEntityCollectionProperty.class;
+        } else {
+            return;
+        }
+        throw new IllegalStateException("""
+                The solutionClass (%s) has a @%s annotated member (%s) that is duplicated by a @%s annotated member (%s).
+                %s""".formatted(solutionClass, annotationClass.getSimpleName(), memberAccessor,
+                otherAnnotationClass.getSimpleName(), duplicate,
+                annotationClass.equals(otherAnnotationClass)
+                        ? "Maybe the annotation is defined on both the field and its getter."
+                        : "Maybe 2 mutually exclusive annotations are configured."));
+    }
+
+    private void afterAnnotationsProcessed(DescriptorPolicy descriptorPolicy) {
+        for (var entityDescriptor : entityDescriptorMap.values()) {
+            entityDescriptor.linkEntityDescriptors(descriptorPolicy);
+        }
+        for (var entityDescriptor : entityDescriptorMap.values()) {
+            entityDescriptor.linkVariableDescriptors(descriptorPolicy);
+        }
+        problemFactOrEntityClassSet = collectEntityAndProblemFactClasses();
+        listVariableDescriptor = findListVariableDescriptor();
+
+        // And finally log the successful completion of processing.
+        if (LOGGER.isTraceEnabled()) {
+            LOGGER.trace("    Model annotations parsed for solution {}:", solutionClass.getSimpleName());
+            for (var entry : entityDescriptorMap.entrySet()) {
+                var entityDescriptor = entry.getValue();
+                LOGGER.trace("        Entity {}:", entityDescriptor.getEntityClass().getSimpleName());
+                for (var variableDescriptor : entityDescriptor.getDeclaredVariableDescriptors()) {
+                    LOGGER.trace("            {} variable {} ({})",
+                            variableDescriptor instanceof GenuineVariableDescriptor ? "Genuine" : "Shadow",
+                            variableDescriptor.getVariableName(), variableDescriptor.getMemberAccessorSpeedNote());
+                }
+            }
+        }
+        initSolutionCloner(descriptorPolicy);
+    }
+
+    private SequencedSet<Class<?>> collectEntityAndProblemFactClasses() {
+        // Figure out all problem fact or entity types that are used within this solution,
+        // using the knowledge we've already gained by processing all the annotations.
+        var entityClassStream = entityDescriptorMap.keySet().stream();
+        var factClassStream = problemFactMemberAccessorMap.values().stream().map(MemberAccessor::getType);
+        var problemFactOrEntityClassStream = concat(entityClassStream, factClassStream);
+        var factCollectionClassStream = problemFactCollectionMemberAccessorMap.values().stream()
+                .map(accessor -> ConfigUtils
+                        .extractGenericTypeParameter("solutionClass", getSolutionClass(), accessor.getType(),
+                                accessor.getGenericType(), ProblemFactCollectionProperty.class, accessor.getName())
+                        .orElse(Object.class));
+        problemFactOrEntityClassStream = concat(problemFactOrEntityClassStream, factCollectionClassStream);
+        // Add constraint configuration, if configured.
+        if (constraintWeightSupplier != null) {
+            problemFactOrEntityClassStream =
+                    concat(problemFactOrEntityClassStream, Stream.of(constraintWeightSupplier.getProblemFactClass()));
+        }
+        return problemFactOrEntityClassStream.collect(Collectors.toCollection(LinkedHashSet::new));
+    }
+
+    private @Nullable ListVariableDescriptor<Solution_> findListVariableDescriptor() {
+        var listVariableDescriptorList = getGenuineEntityDescriptors().stream()
+                .map(EntityDescriptor::getGenuineVariableDescriptorList)
+                .flatMap(Collection::stream)
+                .flatMap(e -> e instanceof ListVariableDescriptor<Solution_> listVariableDescriptor
+                        ? Stream.of(listVariableDescriptor)
+                        : Stream.empty())
+                .toList();
+        if (listVariableDescriptorList.isEmpty()) {
+            return null;
+        }
+        if (listVariableDescriptorList.size() > 1) {
+            throw new UnsupportedOperationException(
+                    "Defining multiple list variables (%s) across the model is currently not supported."
+                            .formatted(listVariableDescriptorList));
+        }
+        return listVariableDescriptorList.getFirst();
+    }
+
+    private void initSolutionCloner(DescriptorPolicy descriptorPolicy) {
+        solutionCloner = solutionCloner == null
+                ? descriptorPolicy.getGeneratedSolutionClonerMap().get(GizmoSolutionClonerFactory.getGeneratedClassName(this))
+                : solutionCloner;
+
+        if (solutionCloner instanceof GizmoSolutionCloner<Solution_> gizmoSolutionCloner) {
+            gizmoSolutionCloner.setSolutionDescriptor(this);
+        }
+        if (solutionCloner == null) {
+            solutionCloner = switch (descriptorPolicy.getDomainAccessType()) {
+                case FORCE_GIZMO -> GizmoSolutionClonerFactory.build(this, memberAccessorFactory.getGizmoClassLoader());
+                // AUTO means we are probably in plain Java, so we need to use reflection so we can clone final fields
+                case AUTO, FORCE_REFLECTION -> new FieldAccessingSolutionCloner<>(this);
+            };
+        }
+    }
+
+    public Class<Solution_> getSolutionClass() {
+        return solutionClass;
+    }
+
+    public MemberAccessorFactory getMemberAccessorFactory() {
+        return memberAccessorFactory;
+    }
+
+    @Nullable
+    public DomainAccessType getDomainAccessType() {
+        return domainAccessType;
+    }
+
+    public <Score_ extends Score<Score_>> ScoreDefinition<Score_> getScoreDefinition() {
+        return Objects.requireNonNull(this.<Score_> getScoreDescriptor()).getScoreDefinition();
+    }
+
+    @SuppressWarnings("unchecked")
+    @Nullable
+    public <Score_ extends Score<Score_>> ScoreDescriptor<Score_> getScoreDescriptor() {
+        return (ScoreDescriptor<Score_>) scoreDescriptor;
+    }
+
+    public SequencedMap<String, MemberAccessor> getProblemFactMemberAccessorMap() {
+        return problemFactMemberAccessorMap;
+    }
+
+    public SequencedMap<String, MemberAccessor> getProblemFactCollectionMemberAccessorMap() {
+        return problemFactCollectionMemberAccessorMap;
+    }
+
+    public SequencedMap<String, MemberAccessor> getEntityMemberAccessorMap() {
+        return entityMemberAccessorMap;
+    }
+
+    public SequencedMap<String, MemberAccessor> getEntityCollectionMemberAccessorMap() {
+        return entityCollectionMemberAccessorMap;
+    }
+
+    @Nullable
+    public SequencedSet<Class<?>> getProblemFactOrEntityClassSet() {
+        return problemFactOrEntityClassSet;
+    }
+
+    @Nullable
+    public ListVariableDescriptor<Solution_> getListVariableDescriptor() {
+        return listVariableDescriptor;
+    }
+
+    @Nullable
+    public SolutionCloner<Solution_> getSolutionCloner() {
+        return solutionCloner;
+    }
+
+    public PlanningSolutionMetaModel<Solution_> getMetaModel() {
+        if (planningSolutionMetaModel == null) {
+            var metaModel = new DefaultPlanningSolutionMetaModel<>(this);
+            for (var entityDescriptor : getEntityDescriptors()) {
+                var entityMetaModel =
+                        entityDescriptor.isGenuine() ? new DefaultGenuineEntityMetaModel<>(metaModel, entityDescriptor)
+                                : new DefaultShadowEntityMetaModel<>(metaModel, entityDescriptor);
+                for (var variableDescriptor : entityDescriptor.getGenuineVariableDescriptorList()) {
+                    if (variableDescriptor.isListVariable()) {
+                        var listVariableDescriptor = (ListVariableDescriptor<Solution_>) variableDescriptor;
+                        var listVariableMetaModel = new DefaultPlanningListVariableMetaModel<>(
+                                (GenuineEntityMetaModel<Solution_, Object>) entityMetaModel, listVariableDescriptor);
+                        entityMetaModel.addVariable(listVariableMetaModel);
+                    } else {
+                        var basicVariableDescriptor = (BasicVariableDescriptor<Solution_>) variableDescriptor;
+                        var basicVariableMetaModel = new DefaultPlanningVariableMetaModel<>(
+                                (GenuineEntityMetaModel<Solution_, Object>) entityMetaModel, basicVariableDescriptor);
+                        entityMetaModel.addVariable(basicVariableMetaModel);
+                    }
+                }
+                for (var shadowVariableDescriptor : entityDescriptor.getShadowVariableDescriptors()) {
+                    var shadowVariableMetaModel =
+                            new DefaultShadowVariableMetaModel<>(entityMetaModel, shadowVariableDescriptor);
+                    entityMetaModel.addVariable(shadowVariableMetaModel);
+                }
+                metaModel.addEntity(entityMetaModel);
+            }
+            this.planningSolutionMetaModel = metaModel;
+        }
+        return planningSolutionMetaModel;
+    }
+
+    public List<BasicVariableDescriptor<Solution_>> getBasicVariableDescriptorList() {
+        if (basicVariableDescriptorList != null) {
+            return basicVariableDescriptorList;
+        }
+        basicVariableDescriptorList = getGenuineEntityDescriptors().stream()
+                .flatMap(entityDescriptor -> entityDescriptor.getBasicVariableDescriptorList().stream())
+                .toList();
+        return basicVariableDescriptorList;
+    }
+
+    public boolean hasBasicVariable() {
+        return !getBasicVariableDescriptorList().isEmpty();
+    }
+
+    public boolean hasListVariable() {
+        return getListVariableDescriptor() != null;
+    }
+
+    public boolean hasBothBasicAndListVariables() {
+        return hasBasicVariable() && hasListVariable();
+    }
+
+    @SuppressWarnings("unchecked")
+    @Nullable
+    public <Score_ extends Score<Score_>> ConstraintWeightSupplier<Solution_, Score_> getConstraintWeightSupplier() {
+        return (ConstraintWeightSupplier<Solution_, Score_>) constraintWeightSupplier;
+    }
+
+    public SequencedSet<Class<?>> getEntityClassSet() {
+        return entityDescriptorMap.sequencedKeySet();
+    }
+
+    public SequencedCollection<EntityDescriptor<Solution_>> getEntityDescriptors() {
+        return entityDescriptorMap.sequencedValues();
+    }
+
+    /**
+     * @return the number of variable descriptors, which is one more than the highest
+     *         {@link VariableDescriptor#getGlobalOrdinal() global ordinal}
+     */
+    public int getVariableDescriptorCount() {
+        if (entityDescriptorMap.isEmpty()) {
+            return 0;
+        }
+        var lastEntityDescriptor = entityDescriptorMap.sequencedValues().getLast();
+        return lastEntityDescriptor.getVariableOrdinalOffset() + lastEntityDescriptor.getDeclaredVariableCount();
+    }
+
+    public SequencedCollection<EntityDescriptor<Solution_>> getGenuineEntityDescriptors() {
+        if (genuineEntityDescriptorList != null) {
+            return genuineEntityDescriptorList;
+        }
+        // Check effective genuine variable descriptors, since subclasses
+        // of a genuine entity with no new genuine variables are also
+        // genuine entities.
+        genuineEntityDescriptorList = entityDescriptorMap.values().stream()
+                .filter(EntityDescriptor::hasAnyEffectiveGenuineVariableDescriptor)
+                .toList();
+        return genuineEntityDescriptorList;
+    }
+
+    @Nullable
+    public EntityDescriptor<Solution_> getEntityDescriptorStrict(Class<?> entityClass) {
+        return entityDescriptorMap.get(entityClass);
+    }
+
+    public boolean hasEntityDescriptor(Class<?> entitySubclass) {
+        var entityDescriptor = findEntityDescriptor(entitySubclass);
+        return entityDescriptor != null;
+    }
+
+    public EntityDescriptor<Solution_> findEntityDescriptorOrFail(Class<?> entitySubclass) {
+        var entityDescriptor = findEntityDescriptor(entitySubclass);
+        if (entityDescriptor == null) {
+            throw new IllegalArgumentException(
+                    """
+                            A planning entity is an instance of a class (%s) that is not configured as a planning entity class (%s).
+                            If that class (%s) (or superclass thereof) is not a @%s annotated class, maybe your @%s annotated class has an incorrect @%s or @%s annotated member.
+                            Otherwise, if you're not using the Quarkus extension or Spring Boot starter, maybe that entity class (%s) is missing from your solver configuration."""
+                            .formatted(entitySubclass, getEntityClassSet(), entitySubclass.getSimpleName(),
+                                    PlanningEntity.class.getSimpleName(), PlanningSolution.class.getSimpleName(),
+                                    PlanningEntityCollectionProperty.class.getSimpleName(),
+                                    PlanningEntityProperty.class.getSimpleName(), entitySubclass.getSimpleName()));
+        }
+        return entityDescriptor;
+    }
+
+    @Nullable
+    public EntityDescriptor<Solution_> findEntityDescriptor(Class<?> entitySubclass) {
+        /*
+         * A slightly optimized variant of map.computeIfAbsent(...).
+         * computeIfAbsent(...) would require the creation of a capturing lambda every time this method is called,
+         * which is created, executed once, and immediately thrown away.
+         * This is a micro-optimization, but it is valuable on the hot path.
+         */
+        var cachedEntityDescriptor = lowestEntityDescriptorMap.get(entitySubclass);
+        if (cachedEntityDescriptor == NULL_ENTITY_DESCRIPTOR) { // Cache hit, no descriptor found.
+            return null;
+        } else if (cachedEntityDescriptor != null) { // Cache hit, descriptor found.
+            return cachedEntityDescriptor;
+        }
+        // Cache miss, look for the descriptor.
+        var newEntityDescriptor = innerFindEntityDescriptor(entitySubclass);
+        if (newEntityDescriptor == null) {
+            // Dummy entity descriptor value, as ConcurrentMap does not allow null values.
+            lowestEntityDescriptorMap.put(entitySubclass, (EntityDescriptor<Solution_>) NULL_ENTITY_DESCRIPTOR);
+            return null;
+        } else {
+            lowestEntityDescriptorMap.put(entitySubclass, newEntityDescriptor);
+            return newEntityDescriptor;
+        }
+    }
+
+    @Nullable
+    private EntityDescriptor<Solution_> innerFindEntityDescriptor(Class<?> entitySubclass) {
+        // Reverse order to find the nearest ancestor
+        for (var entityClass : reversedEntityClassList) {
+            if (entityClass.isAssignableFrom(entitySubclass)) {
+                return entityDescriptorMap.get(entityClass);
+            }
+        }
+        return null;
+    }
+
+    public VariableDescriptor<Solution_> findVariableDescriptorOrFail(Object entity, String variableName) {
+        var entityDescriptor = findEntityDescriptorOrFail(entity.getClass());
+        var variableDescriptor = entityDescriptor.getVariableDescriptor(variableName);
+        if (variableDescriptor == null) {
+            throw new IllegalArgumentException(entityDescriptor.buildInvalidVariableNameExceptionMessage(variableName));
+        }
+        return variableDescriptor;
+    }
+
+    @Nullable
+    public LookupStrategyResolver getLookUpStrategyResolver() {
+        return Objects.requireNonNull(lookUpStrategyResolver);
+    }
+
+    /**
+     * @param solution never null
+     * @return {@code >= 0}
+     */
+    public int getGenuineEntityCount(Solution_ solution) {
+        var entityCount = new MutableInt();
+        // Need to go over every element in every entity collection, as some of the entities may not be genuine.
+        visitAllEntities(solution, fact -> {
+            var entityDescriptor = findEntityDescriptorOrFail(fact.getClass());
+            if (entityDescriptor.isGenuine()) {
+                entityCount.increment();
+            }
+        });
+        return entityCount.intValue();
+    }
+
+    /**
+     * Return accessor for a given member of a given class, if present,
+     * and cache it for future use.
+     *
+     * @param factClass never null
+     * @return null if no such member exists
+     */
+    @Nullable
+    public MemberAccessor getPlanningIdAccessor(Class<?> factClass) {
+        var memberAccessor = planningIdMemberAccessorMap.get(factClass);
+        if (memberAccessor == null) {
+            memberAccessor =
+                    ConfigUtils.findPlanningIdMemberAccessor(factClass, getMemberAccessorFactory(),
+                            Objects.requireNonNull(getDomainAccessType()));
+            var nonNullMemberAccessor = Objects.requireNonNullElse(memberAccessor, DummyMemberAccessor.INSTANCE);
+            planningIdMemberAccessorMap.put(factClass, nonNullMemberAccessor);
+            return memberAccessor;
+        } else if (memberAccessor == DummyMemberAccessor.INSTANCE) {
+            return null;
+        } else {
+            return memberAccessor;
+        }
+    }
+
+    public void visitAllEntities(Solution_ solution, Consumer<Object> visitor) {
+        visitAllEntities(solution, visitor, collection -> collection.forEach(visitor));
+    }
+
+    private void visitAllEntities(Solution_ solution, Consumer<Object> visitor,
+            Consumer<Collection<Object>> collectionVisitor) {
+        for (var entityMemberAccessor : entityMemberAccessorMap.values()) {
+            var entity = extractMemberObject(entityMemberAccessor, solution);
+            if (entity != null) {
+                visitor.accept(entity);
+            }
+        }
+        for (var entityCollectionMemberAccessor : entityCollectionMemberAccessorMap.values()) {
+            var entityCollection = extractMemberCollectionOrArray(entityCollectionMemberAccessor, solution, false);
+            collectionVisitor.accept(entityCollection);
+        }
+    }
+
+    /**
+     *
+     * @param solution solution to extract the entities from
+     * @param entityClass class of the entity to be visited, including subclasses
+     * @param visitor never null; applied to every entity, iteration stops if it returns true
+     */
+    public void visitEntitiesByEntityClass(Solution_ solution, Class<?> entityClass, Predicate<Object> visitor) {
+        for (var entityMemberAccessor : entityMemberAccessorMap.values()) {
+            var entity = extractMemberObject(entityMemberAccessor, solution);
+            if (entityClass.isInstance(entity) && visitor.test(entity)) {
+                return;
+            }
+
+        }
+        for (var entityCollectionMemberAccessor : entityCollectionMemberAccessorMap.values()) {
+            var optionalTypeParameter = ConfigUtils.extractGenericTypeParameter("solutionClass",
+                    entityCollectionMemberAccessor.getDeclaringClass(), entityCollectionMemberAccessor.getType(),
+                    entityCollectionMemberAccessor.getGenericType(), null, entityCollectionMemberAccessor.getName());
+            boolean collectionGuaranteedToContainOnlyGivenEntityType =
+                    optionalTypeParameter.map(entityClass::isAssignableFrom).orElse(false);
+            if (collectionGuaranteedToContainOnlyGivenEntityType) {
+                /*
+                 * In a typical case typeParameter is specified and it is the expected entity or its superclass.
+                 * Therefore we can simply apply the visitor on each element.
+                 */
+                var entityCollection = extractMemberCollectionOrArray(entityCollectionMemberAccessor, solution, false);
+                for (var o : entityCollection) {
+                    if (visitor.test(o)) {
+                        return;
+                    }
+                }
+                continue;
+            }
+            // The collection now is either raw, or it is not of an entity type, such as perhaps a parent interface.
+            boolean collectionCouldPossiblyContainGivenEntityType =
+                    optionalTypeParameter.map(e -> e.isAssignableFrom(entityClass)).orElse(true);
+            if (!collectionCouldPossiblyContainGivenEntityType) {
+                // There is no way how this collection could possibly contain entities of the given type.
+                continue;
+            }
+            // We need to go over every collection member and check if it is an entity of the given type.
+            var entityCollection = extractMemberCollectionOrArray(entityCollectionMemberAccessor, solution, false);
+            for (var entity : entityCollection) {
+                if (entityClass.isInstance(entity) && visitor.test(entity)) {
+                    return;
+                }
+
+            }
+        }
+    }
+
+    public void visitAllProblemFacts(Solution_ solution, Consumer<Object> visitor) {
+        // Visits facts.
+        for (var accessor : problemFactMemberAccessorMap.values()) {
+            var object = extractMemberObject(accessor, solution);
+            if (object != null) {
+                visitor.accept(object);
+            }
+        }
+        // Visits problem facts from problem fact collections.
+        for (var accessor : problemFactCollectionMemberAccessorMap.values()) {
+            var objects = extractMemberCollectionOrArray(accessor, solution, true);
+            for (var object : objects) {
+                visitor.accept(object);
+            }
+        }
+    }
+
+    public void visitAll(Solution_ solution, Consumer<Object> visitor) {
+        visitAllProblemFacts(solution, visitor);
+        visitAllEntities(solution, visitor);
+    }
+
+    /**
+     * @param scoreDirector never null
+     * @return {@code >= 0}
+     */
+    public boolean hasMovableEntities(ScoreDirector<Solution_> scoreDirector) {
+        var workingSolution = scoreDirector.getWorkingSolution();
+        return extractAllEntitiesStream(workingSolution)
+                .anyMatch(entity -> findEntityDescriptorOrFail(entity.getClass()).isMovable(workingSolution, entity));
+    }
+
+    /**
+     * @param solution never null
+     * @return {@code >= 0}
+     */
+    public long getGenuineVariableCount(Solution_ solution) {
+        var result = new MutableLong();
+        visitAllEntities(solution, entity -> {
+            var entityDescriptor = findEntityDescriptorOrFail(entity.getClass());
+            if (entityDescriptor.isGenuine()) {
+                result.add(entityDescriptor.getGenuineVariableCount());
+            }
+        });
+        return result.longValue();
+    }
+
+    public int getValueRangeDescriptorCount() {
+        var count = 0;
+        for (var entityDescriptor : entityDescriptorMap.values()) {
+            count += entityDescriptor.getValueRangeCount();
+        }
+        return count;
+    }
+
+    public List<DeclarativeShadowVariableDescriptor<Solution_>> getDeclarativeShadowVariableDescriptors() {
+        if (declarativeShadowVariableDescriptorList != null) {
+            return declarativeShadowVariableDescriptorList;
+        }
+        declarativeShadowVariableDescriptorList = entityDescriptorMap.values().stream()
+                .flatMap(entityDescriptor -> entityDescriptor.getShadowVariableDescriptors().stream())
+                .flatMap(shadowVariableDescriptor -> {
+                    if (shadowVariableDescriptor instanceof DeclarativeShadowVariableDescriptor<Solution_> declarativeShadowVariableDescriptor) {
+                        return Stream.of(declarativeShadowVariableDescriptor);
+                    }
+                    return Stream.empty();
+                })
+                .distinct()
+                .toList();
+        return declarativeShadowVariableDescriptorList;
+    }
+
+    public boolean hasAnyShadowVariablesInconsistentMember() {
+        return entityDescriptorMap.values().stream()
+                .flatMap(entityDescriptor -> entityDescriptor.getShadowVariableDescriptors().stream())
+                .anyMatch(
+                        shadowVariableDescriptor -> shadowVariableDescriptor instanceof ShadowVariablesInconsistentVariableDescriptor<Solution_>);
+    }
+
+    public Stream<Object> extractAllEntitiesStream(Solution_ solution) {
+        var stream = Stream.empty();
+        for (var memberAccessor : entityMemberAccessorMap.values()) {
+            var entity = extractMemberObject(memberAccessor, solution);
+            if (entity != null) {
+                stream = concat(stream, Stream.of(entity));
+            }
+        }
+        for (var memberAccessor : entityCollectionMemberAccessorMap.values()) {
+            var entityCollection = extractMemberCollectionOrArray(memberAccessor, solution, false);
+            stream = concat(stream, entityCollection.stream());
+        }
+        return stream;
+    }
+
+    @Nullable
+    private Object extractMemberObject(MemberAccessor memberAccessor, Solution_ solution) {
+        return memberAccessor.executeGetter(solution);
+    }
+
+    private Collection<Object> extractMemberCollectionOrArray(MemberAccessor memberAccessor, Solution_ solution,
+            boolean isFact) {
+        Collection<Object> collection;
+        if (memberAccessor.getType().isArray()) {
+            var arrayObject = memberAccessor.executeGetter(solution);
+            collection = ReflectionHelper.transformArrayToList(arrayObject);
+        } else {
+            collection = (Collection<Object>) memberAccessor.executeGetter(solution);
+        }
+        if (collection == null) {
+            throw new IllegalArgumentException(
+                    """
+                            The solutionClass (%s)'s %s (%s) should never return null.
+                            %sMaybe that property (%s) was set with null instead of an empty collection/array when the class (%s) instance was created."""
+                            .formatted(solutionClass, isFact ? "factCollectionProperty" : "entityCollectionProperty",
+                                    memberAccessor,
+                                    memberAccessor instanceof ReflectionFieldMemberAccessor ? ""
+                                            : "Maybe the getter/method always returns null instead of the actual data.\n",
+                                    memberAccessor.getName(), solutionClass.getSimpleName()));
+        }
+        return collection;
+    }
+
+    /**
+     * @param solution never null
+     * @return sometimes null, if the {@link Score} hasn't been calculated yet
+     */
+    public <Score_ extends Score<Score_>> Score_ getScore(Solution_ solution) {
+        return Objects.requireNonNull(this.<Score_> getScoreDescriptor()).getScore(solution);
+    }
+
+    /**
+     * Called when the {@link Score} has been calculated or predicted.
+     *
+     * @param solution never null
+     * @param score sometimes null, in rare occasions to indicate that the old {@link Score} is stale,
+     *        but no new ones has been calculated
+     */
+    public <Score_ extends Score<Score_>> void setScore(Solution_ solution, Score_ score) {
+        Objects.requireNonNull(this.<Score_> getScoreDescriptor()).setScore(solution, score);
+    }
+
+    @Override
+    public String toString() {
+        return "%s(%s)".formatted(getClass().getSimpleName(), solutionClass.getName());
+    }
+}
