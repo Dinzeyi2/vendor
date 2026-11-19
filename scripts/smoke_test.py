@@ -19,12 +19,14 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 BASE = (sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000").rstrip("/")
-KEY = os.environ["API_KEY"]
 
 
-def post(tasks, timeout=1200):
+KEY = os.environ.get("API_KEY", "")
+
+
+def post(tasks, timeout=1200, key=None):
     req = urllib.request.Request(f"{BASE}/v1/execute", data=json.dumps({"tasks": tasks}).encode(),
-                                 headers={"Content-Type": "application/json", "X-API-Key": KEY}, method="POST")
+                                 headers={"Content-Type": "application/json", "X-API-Key": key or KEY}, method="POST")
     t = time.perf_counter()
     with urllib.request.urlopen(req, timeout=timeout) as r:
         body = json.loads(r.read())
@@ -126,43 +128,50 @@ def summarize(op, out):
     return ""
 
 
-failures = 0
-print(f"== individual operations against {BASE}")
-for op, (inputs, check, expect) in CASES.items():
-    (res,), secs = post([{"id": op, "operation": op, "inputs": inputs}])
-    ok = res["status"] == "ok" and bool(check(res["output"]))
-    failures += not ok
-    detail = summarize(op, res["output"]) if res["status"] == "ok" else f"{res['error_type']}: {res['error']}"
-    print(f"[{'PASS' if ok else 'FAIL'}] {op:30s} {secs:6.2f}s  expect: {expect}\n         got: {detail}")
+def main() -> None:
+    global KEY
+    KEY = os.environ["API_KEY"]
+    failures = 0
+    print(f"== individual operations against {BASE}")
+    for op, (inputs, check, expect) in CASES.items():
+        (res,), secs = post([{"id": op, "operation": op, "inputs": inputs}])
+        ok = res["status"] == "ok" and bool(check(res["output"]))
+        failures += not ok
+        detail = summarize(op, res["output"]) if res["status"] == "ok" else f"{res['error_type']}: {res['error']}"
+        print(f"[{'PASS' if ok else 'FAIL'}] {op:30s} {secs:6.2f}s  expect: {expect}\n         got: {detail}")
 
-print("\n== one request calling all 10 libraries")
-results, secs = post([{"id": op.split(".")[0], "operation": op, "inputs": inp} for op, (inp, _, _) in CASES.items()])
-for r in results:
-    ok = r["status"] == "ok" and bool(CASES[r["operation"]][1](r["output"]))
-    failures += not ok
-    print(f"[{'PASS' if ok else 'FAIL'}] {r['id']:10s} {r['status']:5s} {r['duration_ms']:9.1f} ms")
-print(f"total request time {secs:.2f}s")
+    print("\n== one request calling all 10 libraries")
+    results, secs = post([{"id": op.split(".")[0], "operation": op, "inputs": inp} for op, (inp, _, _) in CASES.items()])
+    for r in results:
+        ok = r["status"] == "ok" and bool(CASES[r["operation"]][1](r["output"]))
+        failures += not ok
+        print(f"[{'PASS' if ok else 'FAIL'}] {r['id']:10s} {r['status']:5s} {r['duration_ms']:9.1f} ms")
+    print(f"total request time {secs:.2f}s")
 
-print("\n== failure isolation: bad tasks next to good ones")
-slow_xgb = {"X": rng.normal(size=(20000, 50)).tolist(), "y": rng.normal(size=20000).tolist(),
-            "X_predict": [[0.0] * 50], "n_estimators": 2000, "max_depth": 12}
-results, secs = post([
-    {"id": "slow", "operation": "xgboost.train_predict", "inputs": slow_xgb, "timeout_s": 2},
-    {"id": "bad-input", "operation": "scs.solve", "inputs": {"c": [1], "A": [[1, 2]], "b": [1], "cone": {"l": 1}}},
-    {"id": "unknown", "operation": "nope.op", "inputs": {}},
-    {"id": "fine", "operation": "rapidfuzz.compare", "inputs": {"a": "Drift Protein", "b": "Drift Proteins"}},
-    {"id": "fine-2", "operation": "rapier.simulate", "inputs": CASES["rapier.simulate"][0]},
-])
-expected = {"slow": "timeout", "bad-input": "invalid_input", "unknown": "unknown_operation", "fine": None, "fine-2": None}
-for r in results:
-    want = expected[r["id"]]
-    ok = (r["status"] == "ok") if want is None else (r.get("error_type") == want)
+    print("\n== failure isolation: bad tasks next to good ones")
+    slow_xgb = {"X": rng.normal(size=(20000, 50)).tolist(), "y": rng.normal(size=20000).tolist(),
+                "X_predict": [[0.0] * 50], "n_estimators": 2000, "max_depth": 12}
+    results, secs = post([
+        {"id": "slow", "operation": "xgboost.train_predict", "inputs": slow_xgb, "timeout_s": 2},
+        {"id": "bad-input", "operation": "scs.solve", "inputs": {"c": [1], "A": [[1, 2]], "b": [1], "cone": {"l": 1}}},
+        {"id": "unknown", "operation": "nope.op", "inputs": {}},
+        {"id": "fine", "operation": "rapidfuzz.compare", "inputs": {"a": "Drift Protein", "b": "Drift Proteins"}},
+        {"id": "fine-2", "operation": "rapier.simulate", "inputs": CASES["rapier.simulate"][0]},
+    ])
+    expected = {"slow": "timeout", "bad-input": "invalid_input", "unknown": "unknown_operation", "fine": None, "fine-2": None}
+    for r in results:
+        want = expected[r["id"]]
+        ok = (r["status"] == "ok") if want is None else (r.get("error_type") == want)
+        failures += not ok
+        print(f"[{'PASS' if ok else 'FAIL'}] {r['id']:10s} {r['status']:5s} {r.get('error_type') or '':18s} {(r.get('error') or '')[:70]}")
+    (res,), secs = post([{"id": "after", "operation": "xgboost.train_predict", "inputs": CASES["xgboost.train_predict"][0]}])
+    ok = res["status"] == "ok"
     failures += not ok
-    print(f"[{'PASS' if ok else 'FAIL'}] {r['id']:10s} {r['status']:5s} {r.get('error_type') or '':18s} {(r.get('error') or '')[:70]}")
-(res,), secs = post([{"id": "after", "operation": "xgboost.train_predict", "inputs": CASES["xgboost.train_predict"][0]}])
-ok = res["status"] == "ok"
-failures += not ok
-print(f"[{'PASS' if ok else 'FAIL'}] xgboost worker restarted after timeout and answered in {secs:.2f}s")
+    print(f"[{'PASS' if ok else 'FAIL'}] xgboost worker restarted after timeout and answered in {secs:.2f}s")
 
-print(f"\n{'ALL CHECKS PASSED' if not failures else f'{failures} CHECK(S) FAILED'}")
-sys.exit(1 if failures else 0)
+    print(f"\n{'ALL CHECKS PASSED' if not failures else f'{failures} CHECK(S) FAILED'}")
+    sys.exit(1 if failures else 0)
+
+
+if __name__ == "__main__":
+    main()

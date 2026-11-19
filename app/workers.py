@@ -27,7 +27,9 @@ log = logging.getLogger("uvicorn.error")
 
 STDERR_TAIL_LINES = 40
 MAX_LOG_LINE = 2000
-_SECRET_NAME = re.compile(r"KEY|TOKEN|SECRET|PASSW|CREDENTIAL|AUTH", re.IGNORECASE)
+# Env vars never passed to workers and whose values are redacted from forwarded logs.
+# DATABASE*/PG* cover DATABASE_URL (it embeds the Postgres password) and libpq variables.
+_SECRET_NAME = re.compile(r"KEY|TOKEN|SECRET|PASSW|CREDENTIAL|AUTH|DATABASE|^PG", re.IGNORECASE)
 
 
 def _secret_values() -> List[str]:

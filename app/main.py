@@ -8,12 +8,15 @@ import secrets
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Security, status
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field, field_validator
 
+from app import accounts, db
+from app.account_api import router as account_router
 from app.errors import OperationError
 from app.registry import OPERATIONS, WORKERS, warm_list
 from app.workers import WorkerFailure
@@ -29,10 +32,20 @@ async def lifespan(_app: FastAPI):
     loop = asyncio.get_running_loop()
     for name in warm_list():  # optional pre-start, in the background so /health is up immediately
         loop.run_in_executor(_executor, _warm, name)
+    if db.configured():  # create the schema at boot; failures are retried on first use
+        loop.run_in_executor(_executor, _init_db)
     yield
     for worker in WORKERS.values():
         worker.kill()
     _executor.shutdown(wait=False, cancel_futures=True)
+    db.close()
+
+
+def _init_db() -> None:
+    try:
+        db.pool()
+    except db.DatabaseUnavailable as exc:
+        log.error("database init failed (will retry on first use): %s", exc)
 
 
 def _warm(name: str) -> None:
@@ -43,23 +56,40 @@ def _warm(name: str) -> None:
         log.error("worker %s failed to warm: %s", name, exc)
 
 
-app = FastAPI(title="Unified Algorithm API", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Unified Algorithm API", version="0.3.0", lifespan=lifespan)
+app.include_router(account_router)
 
 API_KEY_ENV = "API_KEY"
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
-def require_api_key(provided: Optional[str] = Security(_api_key_header)) -> None:
-    """Require the X-API-Key header to match the API_KEY environment variable.
+@dataclass(frozen=True)
+class Caller:
+    """Who is calling the algorithm endpoints: the operator (API_KEY) or a customer key."""
+    kind: Literal["operator", "customer"]
+    owner: Optional[accounts.KeyOwner] = None
 
-    Fails closed: if API_KEY is not configured, the endpoint is unavailable.
+
+def require_api_key(provided: Optional[str] = Security(_api_key_header)) -> Caller:
+    """Accept the operator API_KEY or an active customer key in X-API-Key.
+
+    Customer keys are checked against Postgres on every call, so a revoked key fails on its
+    next request. Fails closed: with neither API_KEY nor a database configured, returns 503.
     """
     expected = os.environ.get(API_KEY_ENV)
-    if not expected:
+    if not expected and not db.configured():
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="API key not configured on server")
-    if not provided or not secrets.compare_digest(provided.encode(), expected.encode()):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="invalid or missing API key",
-                            headers={"WWW-Authenticate": "APIKey"})
+    if provided and expected and secrets.compare_digest(provided.encode(), expected.encode()):
+        return Caller("operator")
+    if provided and db.configured() and accounts.looks_like_customer_key(provided):
+        try:
+            owner = accounts.authenticate_key(provided)
+        except db.DatabaseUnavailable:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="key store unavailable") from None
+        if owner is not None:
+            return Caller("customer", owner)
+    raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="invalid, revoked or missing API key",
+                        headers={"WWW-Authenticate": "APIKey"})
 
 
 class Task(BaseModel):
@@ -103,19 +133,26 @@ def health() -> Dict[str, str]:
     return {"status": "ok", "commit": (os.environ.get("RAILWAY_GIT_COMMIT_SHA") or "unknown")[:7]}
 
 
-@app.get("/v1/operations", dependencies=[Depends(require_api_key)])
-def list_operations() -> Dict[str, Any]:
-    return {"operations": [
-        {"operation": name, "library": spec.library, "runs_in": "api" if spec.inline else f"worker:{spec.worker}",
-         "default_timeout_s": spec.default_timeout, "max_timeout_s": spec.max_timeout,
-         "worker_running": bool(spec.worker and WORKERS[spec.worker].alive),
-         "worker_unexpected_exits": WORKERS[spec.worker].exits if spec.worker else 0,
-         "worker_notes": list(WORKERS[spec.worker].notes) if spec.worker else []}
-        for name, spec in OPERATIONS.items()
-    ]}
+@app.get("/v1/operations")
+def list_operations(caller: Caller = Depends(require_api_key)) -> Dict[str, Any]:
+    ops = []
+    for name, spec in OPERATIONS.items():
+        item = {"operation": name, "library": spec.library,
+                "default_timeout_s": spec.default_timeout, "max_timeout_s": spec.max_timeout}
+        if caller.kind == "operator":  # worker internals are for the operator only
+            item.update({
+                "runs_in": "api" if spec.inline else f"worker:{spec.worker}",
+                "worker_running": bool(spec.worker and WORKERS[spec.worker].alive),
+                "worker_unexpected_exits": WORKERS[spec.worker].exits if spec.worker else 0,
+                "worker_notes": list(WORKERS[spec.worker].notes) if spec.worker else []})
+        ops.append(item)
+    return {"operations": ops}
 
 
-async def _run(task: Task) -> TaskResult:
+_STDERR_MARKER = "; last stderr:"
+
+
+async def _run(task: Task, diagnostics: bool) -> TaskResult:
     started = time.perf_counter()
 
     def result(**kw) -> TaskResult:
@@ -138,7 +175,10 @@ async def _run(task: Task) -> TaskResult:
     except OperationError as exc:
         return result(status="error", error_type="invalid_input", error=str(exc))
     except WorkerFailure as exc:
-        return result(status="error", error_type=exc.error_type, error=str(exc))
+        message = str(exc)
+        if not diagnostics:  # worker stderr is shared across requests: never show it to customers
+            message = message.split(_STDERR_MARKER, 1)[0]
+        return result(status="error", error_type=exc.error_type, error=message)
     except asyncio.TimeoutError:
         return result(status="error", error_type="timeout", error=f"operation exceeded {timeout:g}s")
     except Exception as exc:  # never let one task fail the whole request
@@ -146,8 +186,26 @@ async def _run(task: Task) -> TaskResult:
         return result(status="error", error_type="operation_failed", error=f"{type(exc).__name__}: {exc}")
 
 
-@app.post("/v1/execute", response_model=ExecuteResponse, response_model_exclude_none=True,
-          dependencies=[Depends(require_api_key)])
-async def execute(request: ExecuteRequest) -> ExecuteResponse:
-    """Run all tasks concurrently; tasks for the same library are queued on that library's worker."""
-    return ExecuteResponse(results=list(await asyncio.gather(*(_run(t) for t in request.tasks))))
+@app.post("/v1/execute", response_model=ExecuteResponse, response_model_exclude_none=True)
+async def execute(request: ExecuteRequest, caller: Caller = Depends(require_api_key)) -> ExecuteResponse:
+    """Run all tasks concurrently; tasks for the same library are queued on that library's worker.
+
+    Calls made with a customer key are recorded as usage: one entry for the request and one per task.
+    """
+    started = time.perf_counter()
+    results = list(await asyncio.gather(*(_run(t, caller.kind == "operator") for t in request.tasks)))
+    if caller.owner is not None:
+        await _record_usage(caller.owner, (time.perf_counter() - started) * 1000, results)
+    return ExecuteResponse(results=results)
+
+
+async def _record_usage(owner: accounts.KeyOwner, duration_ms: float, results: List[TaskResult]) -> None:
+    # Only the operation name (registered names only), outcome and timing are recorded.
+    entries = [{"operation": r.operation if r.operation in OPERATIONS else "unknown",
+                "status": r.status, "error_type": r.error_type, "duration_ms": r.duration_ms}
+               for r in results]
+    try:
+        await asyncio.get_running_loop().run_in_executor(
+            _executor, accounts.record_usage, owner, round(duration_ms, 1), entries)
+    except Exception as exc:  # the work is done; don't fail the response, but make it visible
+        log.error("usage recording failed for key %s: %s", owner.key_id, type(exc).__name__)
