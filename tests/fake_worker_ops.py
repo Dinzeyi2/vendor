@@ -27,4 +27,15 @@ def boom(_inputs):
     raise RuntimeError("library blew up")
 
 
-OPERATIONS = {"echo": echo, "sleep": sleep, "crash": crash, "bad": bad, "boom": boom}
+def env_probe(inputs):
+    import sys
+    print(f"stderr line with secret {inputs['secret']}", file=sys.stderr, flush=True)
+    return {"api_key_visible": "API_KEY" in os.environ}
+
+
+def exit_clean(_inputs):
+    raise SystemExit(0)
+
+
+OPERATIONS = {"echo": echo, "sleep": sleep, "crash": crash, "bad": bad, "boom": boom,
+              "env_probe": env_probe, "exit_clean": exit_clean}
