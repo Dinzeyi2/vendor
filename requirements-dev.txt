@@ -1,0 +1,4 @@
+-r requirements.txt
+pytest>=8
+httpx>=0.27
+install-jdk>=1.1   # local JDK install into .runtimes/ (see README)

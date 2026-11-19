@@ -1,0 +1,10 @@
+.git
+.venv
+.runtimes
+vendor
+tests
+scripts
+**/__pycache__
+**/node_modules
+.env
+.env.*

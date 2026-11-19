@@ -3,6 +3,10 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
+# Project-local runtimes (JDK, Node) and Node dependencies
+.runtimes/
+node_modules/
+
 # Secrets: never commit real keys
 .env
 .env.*
