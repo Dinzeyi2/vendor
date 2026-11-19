@@ -64,7 +64,30 @@ def test_clean_exit_logs_code_reason_and_stderr(worker, caplog):
     assert "code 0" in str(e.value) and "SystemExit" in str(e.value)
     _wait_for(lambda: "exited unexpectedly" in caplog.text)
     assert "worker fake exited unexpectedly with exit code 0" in caplog.text
-    assert "worker tests.fake_worker_ops exiting: SystemExit" in caplog.text
+    assert "worker tests.fake_worker_ops: exiting: SystemExit" in caplog.text
+
+
+def test_reader_survives_nonblocking_pipe():
+    """Reproduces Julia/libuv switching the request pipe to non-blocking mode."""
+    import os
+    import threading
+    import time
+
+    from app.worker_main import _read_lines
+
+    r, w = os.pipe()
+    os.set_blocking(r, False)  # what libuv does to fds it adopts
+    notes = []
+
+    def writer():
+        time.sleep(0.3)  # request arrives after the worker is already waiting
+        os.write(w, b'{"a": 1}\n{"b": 2}\n')
+        os.close(w)
+
+    threading.Thread(target=writer).start()
+    assert list(_read_lines(r, notes.append)) == [b'{"a": 1}', b'{"b": 2}']
+    assert notes and "non-blocking" in notes[0]
+    os.close(r)
 
 
 def test_crash_is_reported_and_recovered(worker):

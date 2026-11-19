@@ -77,6 +77,14 @@ class WorkerProcess:
         self._lock = threading.Lock()
         self._run: Optional[_Run] = None
         self._seq = 0
+        self.notes: Deque[str] = collections.deque(maxlen=10)
+        self.exits = 0  # unexpected exits since the API started
+
+    def _add_note(self, note: str) -> None:
+        note = redact(note)[:500]
+        log.warning("worker %s note: %s", self.name, note)
+        if note not in self.notes:
+            self.notes.append(note)
 
     # -- lifecycle -----------------------------------------------------
     @property
@@ -105,6 +113,11 @@ class WorkerProcess:
             if "fatal" in msg:  # the worker explains why it is about to exit
                 run.exit_reason = str(msg["fatal"])[:500]
                 continue
+            if "note" in msg:  # diagnostic from the worker
+                self._add_note(str(msg["note"]))
+                continue
+            for n in msg.get("notes") or []:
+                self._add_note(str(n))
             run.lines.put(msg)
         run.lines.put(None)  # EOF: the process exited or closed stdout
 
@@ -124,6 +137,7 @@ class WorkerProcess:
         if run.killed:
             log.info("worker %s stopped by the manager (exit code %s)", self.name, code)
             return
+        self.exits += 1
         tail = "\n".join(f"    {l}" for l in run.stderr_tail) or "    (no stderr output)"
         log.error("worker %s exited unexpectedly with exit code %s; reason: %s; last stderr lines:\n%s",
                   self.name, code, run.exit_reason or "not reported", tail)
@@ -153,9 +167,12 @@ class WorkerProcess:
                 code = run.proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 code = "still running, stdout closed"
-            reason = f"; reason: {run.exit_reason}" if run.exit_reason else ""
+            run.stderr_done.wait(timeout=2)
+            reason = f"; reason: {run.exit_reason}" if run.exit_reason else "; reason: not reported"
+            tail = " | ".join(list(run.stderr_tail)[-3:])[-600:]  # already redacted
             raise WorkerFailure("worker_crashed",
-                                f"worker '{self.name}' exited (code {code}) while {phase}{reason}")
+                                f"worker '{self.name}' exited (code {code}) while {phase}{reason}"
+                                + (f"; last stderr: {tail}" if tail else ""))
         return msg
 
     # -- calls ---------------------------------------------------------

@@ -99,7 +99,8 @@ class ExecuteResponse(BaseModel):
 
 @app.get("/health")
 def health() -> Dict[str, str]:
-    return {"status": "ok"}
+    # RAILWAY_GIT_COMMIT_SHA is set by Railway for GitHub deploys; lets callers confirm what is live.
+    return {"status": "ok", "commit": (os.environ.get("RAILWAY_GIT_COMMIT_SHA") or "unknown")[:7]}
 
 
 @app.get("/v1/operations", dependencies=[Depends(require_api_key)])
@@ -107,7 +108,9 @@ def list_operations() -> Dict[str, Any]:
     return {"operations": [
         {"operation": name, "library": spec.library, "runs_in": "api" if spec.inline else f"worker:{spec.worker}",
          "default_timeout_s": spec.default_timeout, "max_timeout_s": spec.max_timeout,
-         "worker_running": bool(spec.worker and WORKERS[spec.worker].alive)}
+         "worker_running": bool(spec.worker and WORKERS[spec.worker].alive),
+         "worker_unexpected_exits": WORKERS[spec.worker].exits if spec.worker else 0,
+         "worker_notes": list(WORKERS[spec.worker].notes) if spec.worker else []}
         for name, spec in OPERATIONS.items()
     ]}
 

@@ -14,7 +14,8 @@ def api_key(monkeypatch):
 
 
 def test_health_is_public():
-    assert client.get("/health").json() == {"status": "ok"}
+    body = client.get("/health").json()
+    assert body["status"] == "ok" and "commit" in body
 
 
 def test_rapidfuzz_compare():
