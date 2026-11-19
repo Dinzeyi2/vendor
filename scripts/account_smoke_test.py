@@ -78,7 +78,7 @@ s, b1 = call("POST", "/v1/account/keys", headers=site(B), body={"name": "B prima
 check("B creates key -> 201", s == 201, f"prefix {b1.get('prefix')}")
 check("customer key cannot call account API -> 401", call("GET", "/v1/account/keys", headers=site(A, a1["secret"]))[0] == 401)
 _, credits = call("GET", "/v1/account/credits", headers=site(A))
-if credits and credits.get("billing_mode") in ("test", "live"):  # credits are enforced: grant test credits
+if credits and credits.get("billing_mode") == "on":  # credits are enforced: grant test credits
     assert OPERATOR, "billing is enforced: set API_KEY (operator) so the test can grant credits"
     for cust, n in ((A, 200), (B, 10)):
         s, _ = call("POST", "/v1/admin/credits/adjust", headers={"X-API-Key": OPERATOR},

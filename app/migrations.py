@@ -137,9 +137,34 @@ CREATE TABLE stripe_events (
 ALTER TABLE usage_requests ADD COLUMN credits_charged INTEGER NOT NULL DEFAULT 0;
 """
 
+V3_GRANTS_REPLACE_STRIPE = """
+-- Payments now happen on the website; Railway only receives server-to-server credit grants.
+DROP TABLE IF EXISTS stripe_events;
+DROP INDEX IF EXISTS credit_ledger_purchase_once;
+ALTER TABLE credit_ledger DROP COLUMN IF EXISTS purchase_id;
+DROP TABLE IF EXISTS credit_purchases;
+
+-- One row per payment the website reports. payment_id is the website's unique ID
+-- (e.g. a Stripe Checkout session or PaymentIntent ID); a payment can be granted only once.
+CREATE TABLE credit_grants (
+    payment_id   TEXT PRIMARY KEY,
+    customer_id  TEXT NOT NULL REFERENCES customers(id),
+    credits      BIGINT NOT NULL CHECK (credits > 0),
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX credit_grants_customer_idx ON credit_grants (customer_id, created_at DESC);
+
+ALTER TABLE credit_ledger ADD COLUMN payment_id TEXT REFERENCES credit_grants(payment_id);
+ALTER TABLE credit_ledger DROP CONSTRAINT credit_ledger_kind_check;
+ALTER TABLE credit_ledger ADD CONSTRAINT credit_ledger_kind_check
+    CHECK (kind IN ('reserve', 'release', 'grant', 'adjustment'));
+CREATE UNIQUE INDEX credit_ledger_grant_once ON credit_ledger (payment_id) WHERE kind = 'grant';
+"""
+
 MIGRATIONS: List[Tuple[int, str, str]] = [
     (1, "accounts_keys_usage", V1_ACCOUNTS_KEYS_USAGE),
     (2, "prepaid_credits", V2_PREPAID_CREDITS),
+    (3, "grants_replace_stripe", V3_GRANTS_REPLACE_STRIPE),
 ]
 
 

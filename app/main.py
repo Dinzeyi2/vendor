@@ -205,7 +205,7 @@ async def _run(task: Task, diagnostics: bool, on_start: Optional[Callable[[], No
 async def execute(request: ExecuteRequest, caller: Caller = Depends(require_api_key)):
     """Run all tasks concurrently; tasks for the same library are queued on that library's worker.
 
-    Customer keys (when BILLING_MODE is test/live): 1 credit per known operation. The full batch
+    Customer keys (when BILLING_MODE=on): 1 credit per known operation. The full batch
     cost is reserved atomically before any work starts (402 insufficient_credits otherwise);
     operations that never start are refunded. Unknown operations are rejected free of charge.
     Calls made with a customer key are recorded as usage. The operator key is never charged.
@@ -214,7 +214,7 @@ async def execute(request: ExecuteRequest, caller: Caller = Depends(require_api_
     loop = asyncio.get_running_loop()
     reservation: Optional[billing.Reservation] = None
     cost = sum(1 for t in request.tasks if t.operation in OPERATIONS)
-    if caller.owner is not None and cost and billing.config().enforced:
+    if caller.owner is not None and cost and billing.enforced():
         max_seconds = sum(min(t.timeout_s or OPERATIONS[t.operation].default_timeout,
                               OPERATIONS[t.operation].max_timeout)
                           for t in request.tasks if t.operation in OPERATIONS) + 120

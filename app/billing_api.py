@@ -1,9 +1,10 @@
 """HTTP endpoints for prepaid credits.
 
-- GET  /v1/account/credits            website backend (same auth + customer scoping as keys)
-- POST /v1/account/credits/checkout   website backend: {"pack_id": "..."} -> Stripe Checkout URL
-- POST /v1/stripe/webhook             Stripe only: signature verified against the raw body
-- POST /v1/admin/credits/adjust       operator API_KEY only: support grants and corrections
+- POST /v1/credits/grant          website server only, after it confirms a payment:
+                                  Authorization: Bearer <CREDITS_GRANT_SECRET>
+                                  {"customer_id", "credits", "payment_id"}; exactly once per payment_id
+- GET  /v1/account/credits        website backend (same auth + customer scoping as keys)
+- POST /v1/admin/credits/adjust   operator API_KEY only: support grants and corrections
 """
 from __future__ import annotations
 
@@ -11,13 +12,13 @@ import os
 import secrets
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
-from starlette.concurrency import run_in_threadpool
 
 from app import billing, db
-from app.account_api import CUSTOMER_ID_RE, signed_in_customer
+from app.account_api import CUSTOMER_ID_RE, MIN_SECRET_LEN, signed_in_customer
 
 router = APIRouter()
 
@@ -31,42 +32,66 @@ def _call(fn, *args):
         return fn(*args)
     except billing.BillingError as exc:
         return error_response(exc)
-    except db.DatabaseUnavailable as exc:
+    except db.DatabaseUnavailable as exc:  # 503: callers should retry later
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from None
 
 
-class CheckoutRequest(BaseModel):
+def jsonable(value):
+    return jsonable_encoder(value)
+
+
+def _require_db() -> None:
+    if not db.configured():
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "account storage not configured on server")
+
+
+# -- website server: credit grants ------------------------------------------------------------
+def require_grant_secret(authorization: Optional[str] = Header(default=None)) -> None:
+    expected = os.environ.get(billing.GRANT_SECRET_ENV, "")
+    others = {os.environ.get("WEBSITE_BACKEND_SECRET", ""), os.environ.get("API_KEY", "")}
+    if len(expected) < MIN_SECRET_LEN or expected in others:  # must be its own, strong secret
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "credit grants not configured on server")
+    scheme, _, presented = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or not secrets.compare_digest(presented.strip().encode(), expected.encode()):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid grant credential",
+                            headers={"WWW-Authenticate": "Bearer"})
+
+
+class GrantRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    pack_id: str = Field(min_length=1, max_length=64)
+    customer_id: str = Field(pattern=CUSTOMER_ID_RE.pattern,
+                             description="The paying customer's ID (the same ID you send as X-Customer-Id)")
+    credits: int = Field(gt=0, le=billing.MAX_GRANT)
+    payment_id: str = Field(pattern=billing.PAYMENT_ID_RE.pattern,
+                            description="Your unique ID for this payment, e.g. a Stripe Checkout session ID")
 
 
+@router.post("/v1/credits/grant", tags=["credits (website server only)"], dependencies=[Depends(require_grant_secret)],
+             responses={200: {"description": "already_credited: this payment_id was granted before; nothing added"},
+                        201: {"description": "credited"},
+                        409: {"description": "payment_id_conflict: same payment_id, different customer or amount"}})
+def grant_credits(body: GrantRequest):
+    _require_db()
+    try:
+        result = billing.grant(body.customer_id, body.credits, body.payment_id)
+    except billing.BillingError as exc:
+        return error_response(exc)
+    except db.DatabaseUnavailable as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from None
+    return JSONResponse(status_code=201 if result["status"] == "credited" else 200, content=jsonable(result))
+
+
+# -- website backend: balance ----------------------------------------------------------------
 @router.get("/v1/account/credits", tags=["account (website backend only)"])
 def get_credits(customer_id: str = Depends(signed_in_customer)):
     return _call(billing.balance_summary, customer_id)
 
 
-@router.post("/v1/account/credits/checkout", status_code=201, tags=["account (website backend only)"])
-def create_checkout(body: CheckoutRequest, customer_id: str = Depends(signed_in_customer)):
-    return _call(billing.create_checkout, customer_id, body.pack_id)
-
-
-@router.post("/v1/stripe/webhook", include_in_schema=False)
-async def stripe_webhook(request: Request, stripe_signature: Optional[str] = Header(default=None)):
-    payload = await request.body()  # raw bytes: the signature covers the exact body Stripe sent
-    if not db.configured():
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "account storage not configured on server")
-    try:  # blocking Postgres work runs in a thread
-        return await run_in_threadpool(billing.handle_webhook, payload, stripe_signature)
-    except billing.BillingError as exc:
-        return error_response(exc)
-    except db.DatabaseUnavailable as exc:  # 5xx makes Stripe retry later
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from None
-
-
+# -- operator ----------------------------------------------------------------------------------
 class AdjustRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     customer_id: str = Field(pattern=CUSTOMER_ID_RE.pattern)
-    delta: int = Field(ge=-1_000_000_000, le=1_000_000_000)
+    delta: int = Field(ge=-billing.MAX_GRANT, le=billing.MAX_GRANT)
     note: str = Field(min_length=1, max_length=200)
 
 
@@ -80,7 +105,6 @@ def require_operator(x_api_key: Optional[str] = Header(default=None)) -> None:
 def adjust_credits(body: AdjustRequest):
     if body.delta == 0:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "delta must not be 0")
-    if not db.configured():
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "account storage not configured on server")
+    _require_db()
     result = _call(billing.adjust, body.customer_id, body.delta, body.note)
     return result if isinstance(result, JSONResponse) else {"customer_id": body.customer_id, "balance": result}
