@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -81,9 +82,24 @@ def execute(key, tasks):
     return client.post("/v1/execute", headers={"X-API-Key": key}, json={"tasks": tasks})
 
 
-def grant_call(customer, credits, payment_id, secret=GRANT_SECRET, **extra):
-    return client.post("/v1/credits/grant", headers={"Authorization": f"Bearer {secret}"},
-                       json={"customer_id": customer, "credits": credits, "payment_id": payment_id, **extra})
+def iso(dt):
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+def utcnow():
+    return datetime.now(timezone.utc)
+
+
+_NOW = object()
+
+
+def grant_call(customer, credits, payment_id, secret=GRANT_SECRET, purchased_at=_NOW, **extra):
+    body = {"customer_id": customer, "credits": credits, "payment_id": payment_id, **extra}
+    if purchased_at is _NOW:
+        purchased_at = utcnow()
+    if purchased_at is not None:
+        body["purchased_at"] = purchased_at if isinstance(purchased_at, str) else iso(purchased_at)
+    return client.post("/v1/credits/grant", headers={"Authorization": f"Bearer {secret}"}, json=body)
 
 
 def pay(customer, credits=5):
@@ -100,8 +116,13 @@ def assert_ledger_consistent(database_url):
             "SELECT a.customer_id, a.balance, COALESCE(sum(l.delta), 0) FROM credit_accounts a "
             "LEFT JOIN credit_ledger l ON l.customer_id = a.customer_id "
             "GROUP BY a.customer_id, a.balance HAVING a.balance <> COALESCE(sum(l.delta), 0)").fetchall()
+        bad_lots = conn.execute(
+            "SELECT a.customer_id, a.balance, COALESCE(sum(t.remaining), 0) FROM credit_accounts a "
+            "LEFT JOIN credit_lots t ON t.customer_id = a.customer_id "
+            "GROUP BY a.customer_id, a.balance HAVING a.balance <> COALESCE(sum(t.remaining), 0)").fetchall()
         held = conn.execute("SELECT count(*) FROM credit_reservations WHERE status = 'held'").fetchone()[0]
     assert bad == [], f"balance != sum(ledger) for {bad}"
+    assert bad_lots == [], f"balance != sum(lot remainders) for {bad_lots}"
     assert held == 0, "reservations left held"
 
 
@@ -170,9 +191,13 @@ def test_concurrent_duplicate_grants_credit_once(database_url):
 def test_grant_validation():
     c = new_customer()
     bad = [{"credits": 0}, {"credits": -5}, {"credits": 10**12}, {"customer_id": "bad id/.."},
-           {"payment_id": ""}, {"payment_id": "has space"}, {"payment_id": "x" * 256}, {"extra": 1}]
+           {"payment_id": ""}, {"payment_id": "has space"}, {"payment_id": "x" * 256}, {"extra": 1},
+           {"type": "gift"}, {"purchased_at": "2026-11-19T10:00:00"},  # no timezone
+           {"purchased_at": "not a date"}]
     for override in bad:
-        body = {"customer_id": c, "credits": 5, "payment_id": "p_" + secrets.token_hex(4), **override}
+        body = {"customer_id": c, "credits": 5, "payment_id": "p_" + secrets.token_hex(4),
+                "purchased_at": iso(utcnow()), **override}
+        body = {k: v for k, v in body.items() if v is not None}
         r = client.post("/v1/credits/grant", headers={"Authorization": f"Bearer {GRANT_SECRET}"}, json=body)
         assert r.status_code == 422, override
     assert balance(c) == 0
@@ -464,7 +489,7 @@ def test_migrating_a_pre_migration_database_keeps_data(database_url):
             conn.execute("INSERT INTO usage_requests (id, customer_id, key_id, task_count, ok_count, error_count, "
                          "duration_ms) VALUES (%s, 'legacy-cust', %s, 1, 1, 0, 1.0)", (uuid.uuid4(), kid))
         with psycopg.connect(f"{base}/{name}") as conn:
-            assert migrate(conn) == [1, 2, 3]
+            assert migrate(conn) == [1, 2, 3, 4, 5]
         with psycopg.connect(f"{base}/{name}") as conn:
             assert conn.execute("SELECT balance FROM credit_accounts WHERE customer_id = 'legacy-cust'").fetchone() == (0,)
             assert conn.execute("SELECT count(*), sum(credits_charged) FROM usage_requests").fetchone() == (1, 0)

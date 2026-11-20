@@ -2,7 +2,9 @@
 
 - POST /v1/credits/grant          website server only, after it confirms a payment:
                                   Authorization: Bearer <CREDITS_GRANT_SECRET>
-                                  {"customer_id", "credits", "payment_id"}; exactly once per payment_id
+                                  {"customer_id", "credits", "payment_id", optional "type": "paid"|"welcome",
+                                   optional "purchased_at"}; exactly once per payment_id
+- GET  /v1/admin/credits/expiry-report  operator: how legacy balances would be handled (read-only)
 - GET  /v1/account/credits        website backend (same auth + customer scoping as keys)
 - POST /v1/admin/credits/adjust   operator API_KEY only: support grants and corrections
 """
@@ -10,12 +12,13 @@ from __future__ import annotations
 
 import os
 import secrets
-from typing import Optional
+from datetime import datetime
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app import billing, db
 from app.account_api import CUSTOMER_ID_RE, MIN_SECRET_LEN, signed_in_customer
@@ -64,6 +67,17 @@ class GrantRequest(BaseModel):
     credits: int = Field(gt=0, le=billing.MAX_GRANT)
     payment_id: str = Field(pattern=billing.PAYMENT_ID_RE.pattern,
                             description="Your unique ID for this payment, e.g. a Stripe Checkout session ID")
+    type: Literal["paid", "welcome"] = Field(default="paid", description="paid (expires) or welcome (free)")
+    purchased_at: Optional[datetime] = Field(
+        default=None, description="Paid grants: the verified purchase time, ISO 8601 with a timezone. "
+                                  "If omitted (older integrations), Railway's receive time is used.")
+
+    @field_validator("purchased_at")
+    @classmethod
+    def must_have_timezone(cls, value: Optional[datetime]) -> Optional[datetime]:
+        if value is not None and value.utcoffset() is None:
+            raise ValueError("purchased_at needs a timezone, e.g. 2026-11-19T15:04:05Z")
+        return value
 
 
 @router.post("/v1/credits/grant", tags=["credits (website server only)"], dependencies=[Depends(require_grant_secret)],
@@ -73,7 +87,7 @@ class GrantRequest(BaseModel):
 def grant_credits(body: GrantRequest):
     _require_db()
     try:
-        result = billing.grant(body.customer_id, body.credits, body.payment_id)
+        result = billing.grant(body.customer_id, body.credits, body.payment_id, body.type, body.purchased_at)
     except billing.BillingError as exc:
         return error_response(exc)
     except db.DatabaseUnavailable as exc:
@@ -99,6 +113,13 @@ def require_operator(x_api_key: Optional[str] = Header(default=None)) -> None:
     expected = os.environ.get("API_KEY", "")
     if not expected or not x_api_key or not secrets.compare_digest(x_api_key.encode(), expected.encode()):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "operator key required")
+
+
+@router.get("/v1/admin/credits/expiry-report", dependencies=[Depends(require_operator)], include_in_schema=False)
+def expiry_report():
+    """Read-only: how pre-expiration (legacy) balances would be handled under the one-year rule."""
+    _require_db()
+    return _call(billing.expiry_report)
 
 
 @router.post("/v1/admin/credits/adjust", dependencies=[Depends(require_operator)], include_in_schema=False)

@@ -161,10 +161,72 @@ ALTER TABLE credit_ledger ADD CONSTRAINT credit_ledger_kind_check
 CREATE UNIQUE INDEX credit_ledger_grant_once ON credit_ledger (payment_id) WHERE kind = 'grant';
 """
 
+V4_CREDIT_LOTS_AND_EXPIRATION = """
+-- Grants now say what they are and when they were bought. Existing grants keep their terms:
+-- no purchase timestamp and no expiry (see GET /v1/admin/credits/expiry-report).
+ALTER TABLE credit_grants ADD COLUMN grant_type TEXT NOT NULL DEFAULT 'paid'
+    CHECK (grant_type IN ('paid', 'welcome'));
+ALTER TABLE credit_grants ADD COLUMN purchased_at TIMESTAMPTZ;
+ALTER TABLE credit_grants ADD COLUMN expires_at TIMESTAMPTZ;
+
+-- A lot is one batch of credits with its own expiry. The balance is the sum of lot remainders.
+--   welcome / adjustment: free credits, spent first, no expiry
+--   paid: purchased credits, spent earliest-expiring first, expire 1 calendar year after purchase
+--   legacy: balances that existed before lots; paid tier, no expiry (their terms are unchanged)
+CREATE TABLE credit_lots (
+    id           BIGSERIAL PRIMARY KEY,
+    customer_id  TEXT NOT NULL REFERENCES customers(id),
+    source       TEXT NOT NULL CHECK (source IN ('paid', 'welcome', 'adjustment', 'legacy')),
+    payment_id   TEXT UNIQUE REFERENCES credit_grants(payment_id),
+    granted_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at   TIMESTAMPTZ,                   -- NULL: never expires
+    original     BIGINT NOT NULL CHECK (original > 0),
+    remaining    BIGINT NOT NULL CHECK (remaining >= 0 AND remaining <= original),
+    expired_at   TIMESTAMPTZ                    -- when its unspent credits were written off
+);
+CREATE INDEX credit_lots_customer_idx ON credit_lots (customer_id) WHERE remaining > 0;
+CREATE INDEX credit_lots_expiry_idx ON credit_lots (expires_at) WHERE remaining > 0 AND expires_at IS NOT NULL;
+
+-- Preserve every existing balance exactly, as one non-expiring legacy lot per customer.
+INSERT INTO credit_lots (customer_id, source, original, remaining)
+SELECT customer_id, 'legacy', balance, balance FROM credit_accounts WHERE balance > 0;
+
+-- Which lots each reservation drew from, in spend order (refunds go back to the same lots).
+CREATE TABLE credit_reservation_lots (
+    reservation_id  UUID NOT NULL REFERENCES credit_reservations(id),
+    seq             INTEGER NOT NULL,
+    lot_id          BIGINT NOT NULL REFERENCES credit_lots(id),
+    amount          BIGINT NOT NULL CHECK (amount > 0),
+    PRIMARY KEY (reservation_id, seq)
+);
+
+-- Credits a refund could not return because their lot had expired by settlement time.
+ALTER TABLE credit_reservations ADD COLUMN forfeited INTEGER NOT NULL DEFAULT 0 CHECK (forfeited >= 0);
+
+ALTER TABLE credit_ledger ADD COLUMN lot_id BIGINT REFERENCES credit_lots(id);
+ALTER TABLE credit_ledger DROP CONSTRAINT credit_ledger_kind_check;
+ALTER TABLE credit_ledger ADD CONSTRAINT credit_ledger_kind_check
+    CHECK (kind IN ('reserve', 'release', 'grant', 'adjustment', 'expire'));
+-- A refund can now touch several lots: once per (reservation, lot).
+DROP INDEX credit_ledger_release_once;
+CREATE UNIQUE INDEX credit_ledger_release_once ON credit_ledger (reservation_id, lot_id) WHERE kind = 'release';
+-- A lot expires once.
+CREATE UNIQUE INDEX credit_ledger_expire_once ON credit_ledger (lot_id) WHERE kind = 'expire';
+"""
+
+V5_GRANT_PURCHASE_TIME_SOURCE = """
+-- Where a paid grant's purchase time came from: 'verified' (sent by the website) or 'received'
+-- (not sent; Railway's receive time was used). NULL for grants from before expiration existed.
+ALTER TABLE credit_grants ADD COLUMN purchased_at_source TEXT
+    CHECK (purchased_at_source IN ('verified', 'received'));
+"""
+
 MIGRATIONS: List[Tuple[int, str, str]] = [
     (1, "accounts_keys_usage", V1_ACCOUNTS_KEYS_USAGE),
     (2, "prepaid_credits", V2_PREPAID_CREDITS),
     (3, "grants_replace_stripe", V3_GRANTS_REPLACE_STRIPE),
+    (4, "credit_lots_and_expiration", V4_CREDIT_LOTS_AND_EXPIRATION),
+    (5, "grant_purchase_time_source", V5_GRANT_PURCHASE_TIME_SOURCE),
 ]
 
 

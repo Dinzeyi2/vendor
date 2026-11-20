@@ -16,6 +16,7 @@ import sys
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Barrier
 
@@ -59,9 +60,11 @@ def key(c, name):
     return k
 
 
-def grant(c, credits, payment_id, secret=GRANT):
-    return call("POST", "/v1/credits/grant", headers={"Authorization": f"Bearer {secret}"},
-                body={"customer_id": c, "credits": credits, "payment_id": payment_id})
+def grant(c, credits, payment_id, secret=GRANT, purchased_at=None, type_="paid"):
+    body = {"customer_id": c, "credits": credits, "payment_id": payment_id, "type": type_}
+    if type_ == "paid":
+        body["purchased_at"] = (purchased_at or datetime.now(timezone.utc)).isoformat().replace("+00:00", "Z")
+    return call("POST", "/v1/credits/grant", headers={"Authorization": f"Bearer {secret}"}, body=body)
 
 
 def pay(c, credits):
@@ -161,6 +164,21 @@ check("charged exactly 10 credits (balance 0)", balance(A) == 0)
 u = call("GET", "/v1/account/usage", headers=site(A))[1]
 check("usage recorded with credits_charged", u["recent_requests"][0]["credits_charged"] == 10)
 check("operator key still works and is not charged", execute(OPERATOR, fuzz(3))[0] == 200)
+
+print("\n== expiration")
+s, r = grant(B, 6, "pay_expired_" + run, purchased_at=datetime.now(timezone.utc) - timedelta(days=367))
+check("purchase reported >1 year late -> credited but expired on arrival", s == 201 and r.get("expired_on_arrival") == 6
+      and balance(B) == 0, r)
+s, r = execute(b1["secret"], fuzz(1))
+check("only expired credits -> 402 insufficient_credits", s == 402 and r.get("balance") == 0)
+s, _ = grant(B, 2, "welcome_" + run, type_="welcome")
+s2, _ = grant(B, 3, "pay_fresh_" + run, purchased_at=datetime.now(timezone.utc) - timedelta(days=2))
+_, cr = call("GET", "/v1/account/credits", headers=site(B))
+check("welcome + paid: free 2, paid 3, next expiration ~1 year after purchase",
+      s == 201 and s2 == 201 and (cr["free_balance"], cr["paid_balance"]) == (2, 3)
+      and cr["next_expiration"]["amount"] == 3, cr.get("next_expiration"))
+check("welcome credits are spent first", execute(b1["secret"], fuzz(2))[0] == 200 and
+      call("GET", "/v1/account/credits", headers=site(B))[1]["free_balance"] == 0 and balance(B) == 3)
 
 for c, k in ((A, a1), (A, a2), (B, b1)):
     call("POST", f"/v1/account/keys/{k['id']}/revoke", headers=site(c))
