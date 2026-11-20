@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence
 
+from app import catalog
 from app.db import pool
 
 KEY_PREFIX = "uak_"          # "unified algorithm key"
@@ -154,13 +155,12 @@ def usage_report(customer_id: str, start: datetime, end: datetime, key_id: Optio
                     "WHERE customer_id = %s AND request_id = ANY(%s) ORDER BY id",
                     (customer_id, [r[0] for r in recent])).fetchall():
                 ops_by_req.setdefault(rid, []).append(
-                    {"operation": op, "status": status, "error_type": etype, "duration_ms": round(dur, 1)})
+                    {"operation": catalog.canonical(op), "status": status, "error_type": etype, "duration_ms": round(dur, 1)})
     return {
         "start": start, "end": end, "key_id": str(key_id) if key_id else None,
         "totals": {"requests": req_count, "operations": ops, "operations_ok": ok, "operations_error": err,
                    "credits_charged": int(credits)},
-        "by_operation": [{"operation": o, "count": c, "ok": k, "error": e, "avg_duration_ms": round(a or 0, 1)}
-                         for o, c, k, e, a in by_op],
+        "by_operation": _merge_aliases(by_op),
         "by_key": [{"key_id": str(i), "name": n, "prefix": pf, "status": "revoked" if rv else "active",
                     "requests": rq, "operations": oc} for i, n, pf, rv, rq, oc in by_key],
         "by_day": [{"date": d.isoformat(), "requests": rq, "operations": oc} for d, rq, oc in by_day],
@@ -170,3 +170,18 @@ def usage_report(customer_id: str, start: datetime, end: datetime, key_id: Optio
              "operations": ops_by_req.get(i, [])}
             for i, k, t, tc, oc, ec, d, cc in recent],
     }
+
+
+def _merge_aliases(rows) -> List[Dict[str, Any]]:
+    """Usage recorded under an operation's original name is reported under its public name."""
+    merged: Dict[str, Dict[str, Any]] = {}
+    for op, count, ok, err, avg in rows:
+        m = merged.setdefault(catalog.canonical(op), {"count": 0, "ok": 0, "error": 0, "total_ms": 0.0})
+        m["count"] += count
+        m["ok"] += ok
+        m["error"] += err
+        m["total_ms"] += float(avg or 0) * count
+    out = [{"operation": op, "count": m["count"], "ok": m["ok"], "error": m["error"],
+            "avg_duration_ms": round(m["total_ms"] / m["count"], 1) if m["count"] else 0.0}
+           for op, m in merged.items()]
+    return sorted(out, key=lambda r: (-r["count"], r["operation"]))

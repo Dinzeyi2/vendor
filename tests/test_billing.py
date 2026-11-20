@@ -262,8 +262,8 @@ def test_two_customers_stay_isolated(database_url):
 # -- charging rules ----------------------------------------------------------------------------
 def test_insufficient_credits_blocks_and_runs_nothing(monkeypatch, database_url):
     ran = []
-    spec = OPERATIONS["rapidfuzz.compare"]
-    monkeypatch.setitem(OPERATIONS, "rapidfuzz.compare",
+    spec = OPERATIONS["text.similarity"]                 # fuzz() sends the alias rapidfuzz.compare
+    monkeypatch.setitem(OPERATIONS, "text.similarity",
                         OpSpec(spec.library, spec.default_timeout, spec.max_timeout,
                                inline=lambda inputs: ran.append(1) or spec.inline(inputs)))
     c = new_customer()

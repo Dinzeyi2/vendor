@@ -15,11 +15,11 @@ from fastapi import Depends, FastAPI, HTTPException, Security, status
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field, field_validator
 
-from app import accounts, billing, db
+from app import accounts, billing, catalog, db
 from app.account_api import router as account_router
 from app.billing_api import error_response, router as billing_router
 from app.errors import OperationError
-from app.registry import OPERATIONS, WORKERS, warm_list
+from app.registry import OPERATIONS, WORKERS, lookup, warm_list
 from app.workers import WorkerFailure
 
 log = logging.getLogger("uvicorn.error")
@@ -65,7 +65,7 @@ def _warm(name: str) -> None:
         log.error("worker %s failed to warm: %s", name, exc)
 
 
-app = FastAPI(title="Unified Algorithm API", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="Cognex API", version="0.5.0", lifespan=lifespan)
 app.include_router(account_router)
 app.include_router(billing_router)
 
@@ -104,7 +104,7 @@ def require_api_key(provided: Optional[str] = Security(_api_key_header)) -> Call
 
 class Task(BaseModel):
     id: str
-    operation: str
+    operation: str = Field(description="A Cognex operation name from GET /v1/operations, e.g. text.similarity")
     inputs: Dict[str, Any] = Field(default_factory=dict)
     timeout_s: Optional[float] = Field(default=None, gt=0, description="Override the operation's default timeout (capped).")
 
@@ -143,20 +143,39 @@ def health() -> Dict[str, str]:
     return {"status": "ok", "commit": (os.environ.get("RAILWAY_GIT_COMMIT_SHA") or "unknown")[:7]}
 
 
+def optional_caller(provided: Optional[str] = Security(_api_key_header)) -> Optional[Caller]:
+    """No key: public view. A key, if sent, must be valid (so a typo is not silently ignored)."""
+    return require_api_key(provided) if provided else None
+
+
 @app.get("/v1/operations")
-def list_operations(caller: Caller = Depends(require_api_key)) -> Dict[str, Any]:
+def list_operations(caller: Optional[Caller] = Depends(optional_caller)) -> Dict[str, Any]:
+    """Public catalog of Cognex operations. Compatibility aliases are accepted but not listed."""
+    operator = caller is not None and caller.kind == "operator"
     ops = []
     for name, spec in OPERATIONS.items():
-        item = {"operation": name, "library": spec.library,
-                "default_timeout_s": spec.default_timeout, "max_timeout_s": spec.max_timeout}
-        if caller.kind == "operator":  # worker internals are for the operator only
+        meta = catalog.BY_NAME.get(name)
+        item: Dict[str, Any] = {"operation": name, "summary": meta.summary if meta else "",
+                                "credits": catalog.CREDITS_PER_OPERATION,
+                                "default_timeout_s": spec.default_timeout, "max_timeout_s": spec.max_timeout}
+        if operator:  # aliases and worker internals are for the operator only
             item.update({
+                "aliases": [a for a, n in catalog.ALIASES.items() if n == name],
                 "runs_in": "api" if spec.inline else f"worker:{spec.worker}",
                 "worker_running": bool(spec.worker and WORKERS[spec.worker].alive),
                 "worker_unexpected_exits": WORKERS[spec.worker].exits if spec.worker else 0,
                 "worker_notes": list(WORKERS[spec.worker].notes) if spec.worker else []})
         ops.append(item)
-    return {"operations": ops}
+    return {"credits_per_operation": catalog.CREDITS_PER_OPERATION, "operations": ops,
+            "open_source_acknowledgements": "/v1/open-source"}
+
+
+@app.get("/v1/open-source")
+def open_source() -> Dict[str, Any]:
+    """Public: the open-source projects behind the operations, with their licenses (attribution page)."""
+    return {"projects": [
+        {"operation": e.name, "project": e.built_on.project, "license": e.built_on.license,
+         "copyright": e.built_on.copyright, "source": e.built_on.source} for e in catalog.ENTRIES]}
 
 
 _STDERR_MARKER = "; last stderr:"
@@ -169,10 +188,11 @@ async def _run(task: Task, diagnostics: bool, on_start: Optional[Callable[[], No
         return TaskResult(id=task.id, operation=task.operation,
                           duration_ms=round((time.perf_counter() - started) * 1000, 1), **kw)
 
-    spec = OPERATIONS.get(task.operation)
-    if spec is None:
+    found = lookup(task.operation)
+    if found is None:
         return result(status="error", error_type="unknown_operation",
-                      error=f"unknown operation '{task.operation}'")
+                      error=f"unknown operation '{task.operation}'; see GET /v1/operations")
+    public, spec = found
     timeout = min(task.timeout_s or spec.default_timeout, spec.max_timeout)
     loop = asyncio.get_running_loop()
     try:
@@ -184,7 +204,10 @@ async def _run(task: Task, diagnostics: bool, on_start: Optional[Callable[[], No
             output = await asyncio.wait_for(loop.run_in_executor(_executor, run_inline), timeout)
         else:
             output = await loop.run_in_executor(_executor, WORKERS[spec.worker].call,
-                                                task.operation, task.inputs, timeout, on_start)
+                                                spec.internal or public, task.inputs, timeout, on_start)
+        if task.operation == public:  # engine-specific fields are only kept for the original names
+            for key in catalog.ENGINE_FIELDS.get(public, ()):
+                output.pop(key, None)
         return result(status="ok", output=output)
     except OperationError as exc:
         return result(status="error", error_type="invalid_input", error=str(exc))
@@ -192,6 +215,8 @@ async def _run(task: Task, diagnostics: bool, on_start: Optional[Callable[[], No
         message = str(exc)
         if not diagnostics:  # worker stderr is shared across requests: never show it to customers
             message = message.split(_STDERR_MARKER, 1)[0]
+            if spec.internal:  # name the operation the way the customer knows it
+                message = message.replace(spec.internal, public)
         return result(status="error", error_type=exc.error_type, error=message)
     except asyncio.TimeoutError:
         return result(status="error", error_type="timeout", error=f"operation exceeded {timeout:g}s")
@@ -205,7 +230,7 @@ async def _run(task: Task, diagnostics: bool, on_start: Optional[Callable[[], No
 async def execute(request: ExecuteRequest, caller: Caller = Depends(require_api_key)):
     """Run all tasks concurrently; tasks for the same library are queued on that library's worker.
 
-    Customer keys (when BILLING_MODE=on): 1 credit per known operation. The full batch
+    Customer keys (when BILLING_MODE=on): 1 credit per known operation (public name or alias). The full batch
     cost is reserved atomically before any work starts (402 insufficient_credits otherwise);
     operations that never start are refunded. Unknown operations are rejected free of charge.
     Calls made with a customer key are recorded as usage. The operator key is never charged.
@@ -213,11 +238,10 @@ async def execute(request: ExecuteRequest, caller: Caller = Depends(require_api_
     started = time.perf_counter()
     loop = asyncio.get_running_loop()
     reservation: Optional[billing.Reservation] = None
-    cost = sum(1 for t in request.tasks if t.operation in OPERATIONS)
+    known = [(t, found[1]) for t in request.tasks if (found := lookup(t.operation))]
+    cost = len(known) * catalog.CREDITS_PER_OPERATION
     if caller.owner is not None and cost and billing.enforced():
-        max_seconds = sum(min(t.timeout_s or OPERATIONS[t.operation].default_timeout,
-                              OPERATIONS[t.operation].max_timeout)
-                          for t in request.tasks if t.operation in OPERATIONS) + 120
+        max_seconds = sum(min(t.timeout_s or spec.default_timeout, spec.max_timeout) for t, spec in known) + 120
         try:
             reservation = await loop.run_in_executor(_executor, billing.reserve, caller.owner, cost, max_seconds)
         except billing.BillingError as exc:
@@ -243,8 +267,8 @@ async def execute(request: ExecuteRequest, caller: Caller = Depends(require_api_
 
 async def _record_usage(owner: accounts.KeyOwner, duration_ms: float, results: List[TaskResult],
                         credits_charged: int) -> None:
-    # Only the operation name (registered names only), outcome and timing are recorded.
-    entries = [{"operation": r.operation if r.operation in OPERATIONS else "unknown",
+    # Only the operation's public name (registered names only), outcome and timing are recorded.
+    entries = [{"operation": found[0] if (found := lookup(r.operation)) else "unknown",
                 "status": r.status, "error_type": r.error_type, "duration_ms": r.duration_ms}
                for r in results]
     try:

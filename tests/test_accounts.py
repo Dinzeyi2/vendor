@@ -122,7 +122,7 @@ def test_usage_recorded_per_request_and_operation(monkeypatch):
     u = client.get("/v1/account/usage", headers=site(c)).json()
     assert u["totals"] == {"requests": 1, "operations": 3, "operations_ok": 1, "operations_error": 2,
                            "credits_charged": 0}  # BILLING_MODE unset: nothing is charged
-    assert {o["operation"] for o in u["by_operation"]} == {"rapidfuzz.compare", "unknown", "scs.solve"}
+    assert {o["operation"] for o in u["by_operation"]} == {"text.similarity", "unknown", "optimization.solve_convex"}  # aliases reported by public name
     req = u["recent_requests"][0]
     assert req["key_id"] == k["id"] and req["task_count"] == 3 and len(req["operations"]) == 3
     assert {o["error_type"] for o in req["operations"]} == {None, "unknown_operation", "worker_crashed"}
