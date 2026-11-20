@@ -73,7 +73,7 @@ def main() -> None:
     if not os.environ.get("COGNEX_API_KEY"):
         sys.exit("set COGNEX_API_KEY")
     text = GUIDE.read_text(encoding="utf-8").replace(RAILWAY, base)
-    named = re.findall(r"(?i)rapidfuzz|hnswlib|xgboost|dowhy|kornia|paddle|pysr|timefold|rapier|github|scs", text)
+    named = re.findall(r"(?i)rapidfuzz|hnswlib|xgboost|dowhy|kornia|paddle|pysr|timefold|rapier|github|\bscs\b", text)
     assert not named, f"the guide must show only Cognex names; found {sorted(set(named))}"
     bash = shutil.which("bash") or sys.exit("bash is required to run the curl examples")
     results_ok = []
