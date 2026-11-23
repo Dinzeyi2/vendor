@@ -132,6 +132,7 @@ def test_submit_only_the_url_becomes_ready_and_the_copied_request_works():
     assert imp["operation"] == "geodist.geodist"
     assert imp["license"]["spdx"] == "MIT" and "Cognex Test Fixtures" in imp["license"]["copyright"]
     assert imp["example_response"]["results"][0]["status"] == "ok"   # the verification call's real result
+    assert imp["example_response"]["results"][0]["id"] == imp["example_request"]["body"]["tasks"][0]["id"] == "1"
     ex = imp["example_request"]
     assert ex["url"] == "https://cognex.example/v1/execute" and "X-API-Key" in ex["headers"]
     assert ex["body"] == {"tasks": [{"id": "1", "operation": "geodist.geodist",

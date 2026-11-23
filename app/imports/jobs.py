@@ -94,11 +94,18 @@ def public_view(row: Dict[str, Any], base_url: str) -> Dict[str, Any]:
                 "body": body,
                 "curl": (f"curl -sS {base_url}/v1/execute \\\n  -H \"Content-Type: application/json\" \\\n"
                          f"  -H \"X-API-Key: $COGNEX_API_KEY\" \\\n  -d '{json.dumps(body)}'")},
-            "example_response": row["example_response"],
+            "example_response": _as_example_response(row["example_response"]),
             "plain_english_example": {"tasks": [{"id": "1", "request": m["example"]["request"],
                                                  "data": m["example"]["data"]}]},
             "credits_per_call": catalog.CREDITS_PER_OPERATION})
     return out
+
+
+def _as_example_response(stored: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The verification call's response, with its task id matching example_request ("1")."""
+    if not stored:
+        return stored
+    return {**stored, "results": [{**r, "id": "1"} for r in stored.get("results", [])]}
 
 
 # -- submission -------------------------------------------------------------------------------------
