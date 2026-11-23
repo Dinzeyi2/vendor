@@ -11,6 +11,27 @@ When the user says **"Add this GitHub repo to Cognex: <URL>"**, follow
 `.claude/skills/add-github-repo/SKILL.md`. Capabilities are added only through manifests in
 `app/capabilities/` plus adapters in `app/ops/`, never by editing the router or registry.
 
+## Customer GitHub imports (self-service)
+
+Signed-in customers paste a public GitHub URL. Cognex then fetches the repo, checks its license
+and analyzes it, installs dependencies (wheels only), and discovers the algorithm and tests it
+in the sandbox. Finally it verifies the operation with a real `/v1/execute` call, and the import
+is Ready, private to that customer.
+
+- `app/imports/` holds the pipeline:
+  - `jobs.py`: queue, worker, stages, failure codes
+  - `github.py`, `licensing.py`, `packaging.py`, `installer.py`: trusted steps that never run repo code
+  - `sandbox.py` + `sandbox_boot.py` + `runner.py`: isolated execution
+  - `private.py`: per-customer capabilities
+- The endpoints live in `app/imports_api.py`.
+- **Untrusted code runs only in the sandbox:** a random unprivileged uid, an empty environment,
+  seccomp blocking network sockets, and resource limits. Strict mode needs Linux and root, which
+  Railway provides. Check it with `GET /v1/admin/imports/sandbox-selftest` (operator key).
+- `COGNEX_SANDBOX=insecure-dev` is for tests with this repo's own fixtures only. Never use it
+  to run third-party code on a developer machine.
+- Imports are never added to the global registry or catalog. Keep it that way: they're looked up
+  per caller in `app/imports/private.py`.
+
 ## Layout
 
 - `app/capabilities/*.json`: one manifest per operation. It holds:

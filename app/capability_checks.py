@@ -79,7 +79,7 @@ def check(cap: Capability, caps: List[Capability]) -> List[str]:
         problems.append(f"public text mentions library names {leaked}")
 
     lic = ROOT / cap.built_on.license_file
-    if not lic.is_file() or lic.stat().st_size < 200:
+    if not cap.built_on.license_file.startswith("licenses/") or not lic.is_file() or lic.stat().st_size < 200:
         problems.append(f"license file {cap.built_on.license_file} is missing or empty")
     if not _pinned(cap):
         dep = cap.built_on.dependency

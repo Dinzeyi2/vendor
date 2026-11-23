@@ -228,6 +228,46 @@ ALTER TABLE usage_operations ADD CONSTRAINT usage_operations_status_check
     CHECK (status IN ('ok', 'error', 'needs_clarification'));
 """
 
+V7_GITHUB_IMPORTS = """
+-- Customer self-service imports of public GitHub repos. Private to the customer that submitted
+-- them; one import per (customer, repo, commit).
+CREATE TABLE github_imports (
+    id              UUID PRIMARY KEY,
+    customer_id     TEXT NOT NULL REFERENCES customers(id),
+    repo_url        TEXT NOT NULL,
+    repo_full_name  TEXT NOT NULL,
+    commit_sha      TEXT NOT NULL CHECK (commit_sha ~ '^[0-9a-f]{40}$'),
+    entry_point     TEXT,
+    status          TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'ready', 'failed')),
+    stage           TEXT NOT NULL DEFAULT 'queued',
+    failure_code    TEXT,
+    failure_reason  TEXT,
+    failure_details JSONB,
+    operation       TEXT,
+    manifest        JSONB,
+    spec            JSONB,
+    pins            JSONB,
+    license_spdx    TEXT,
+    license_text    TEXT,
+    example_response JSONB,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    claimed_by      UUID,
+    claimed_at      TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    ready_at        TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX github_imports_once ON github_imports (customer_id, lower(repo_full_name), commit_sha);
+CREATE UNIQUE INDEX github_imports_operation ON github_imports (customer_id, operation)
+    WHERE operation IS NOT NULL AND status IN ('running', 'ready');
+CREATE INDEX github_imports_queue ON github_imports (status, created_at);
+CREATE INDEX github_imports_customer ON github_imports (customer_id, created_at DESC);
+
+-- Short-lived keys Cognex mints to verify an import through /v1/execute (never billed, never listed).
+ALTER TABLE api_keys ADD COLUMN kind TEXT NOT NULL DEFAULT 'customer' CHECK (kind IN ('customer', 'import_check'));
+ALTER TABLE api_keys ADD COLUMN scope TEXT;
+"""
+
 MIGRATIONS: List[Tuple[int, str, str]] = [
     (1, "accounts_keys_usage", V1_ACCOUNTS_KEYS_USAGE),
     (2, "prepaid_credits", V2_PREPAID_CREDITS),
@@ -235,6 +275,7 @@ MIGRATIONS: List[Tuple[int, str, str]] = [
     (4, "credit_lots_and_expiration", V4_CREDIT_LOTS_AND_EXPIRATION),
     (5, "grant_purchase_time_source", V5_GRANT_PURCHASE_TIME_SOURCE),
     (6, "usage_clarifications", V6_USAGE_CLARIFICATIONS),
+    (7, "github_imports", V7_GITHUB_IMPORTS),
 ]
 
 

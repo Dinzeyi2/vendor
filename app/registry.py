@@ -29,6 +29,7 @@ class OpSpec:
     inline: Optional[Callable] = None
     worker: Optional[str] = None
     internal: Optional[str] = None  # name inside the worker; defaults to the public name
+    runner: Optional[Callable] = None  # customer imports: runner(inputs, timeout, on_start) in the sandbox
 
 
 def _java_env() -> Dict[str, str]:

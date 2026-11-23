@@ -33,6 +33,8 @@ def looks_like_customer_key(value: str) -> bool:
 class KeyOwner:
     customer_id: str
     key_id: uuid.UUID
+    kind: str = "customer"        # "import_check": Cognex's own verification key (never billed)
+    scope: Optional[str] = None   # import_check keys: the one import they may call
 
 
 class TooManyKeys(Exception):
@@ -47,7 +49,7 @@ def _key_row(row) -> Dict[str, Any]:
 
 
 # -- keys --------------------------------------------------------------------
-def create_key(customer_id: str, name: str) -> Dict[str, Any]:
+def create_key(customer_id: str, name: str, kind: str = "customer", scope: Optional[str] = None) -> Dict[str, Any]:
     secret = KEY_PREFIX + secrets.token_urlsafe(32)
     key_id = uuid.uuid4()
     with pool().connection() as conn:
@@ -57,14 +59,14 @@ def create_key(customer_id: str, name: str) -> Dict[str, Any]:
                      (customer_id,))
         # Lock the customer row so concurrent creates can't exceed the active-key limit.
         conn.execute("SELECT 1 FROM customers WHERE id = %s FOR UPDATE", (customer_id,))
-        active = conn.execute("SELECT count(*) FROM api_keys WHERE customer_id = %s AND revoked_at IS NULL",
-                              (customer_id,)).fetchone()[0]
-        if active >= MAX_ACTIVE_KEYS:
+        active = conn.execute("SELECT count(*) FROM api_keys WHERE customer_id = %s AND revoked_at IS NULL "
+                              "AND kind = 'customer'", (customer_id,)).fetchone()[0]
+        if kind == "customer" and active >= MAX_ACTIVE_KEYS:
             raise TooManyKeys(f"a customer can have at most {MAX_ACTIVE_KEYS} active keys")
         row = conn.execute(
-            "INSERT INTO api_keys (id, customer_id, name, prefix, key_hash) VALUES (%s, %s, %s, %s, %s) "
-            "RETURNING id, name, prefix, created_at, last_used_at, revoked_at",
-            (key_id, customer_id, name, secret[:PREFIX_DISPLAY_LEN], hash_key(secret))).fetchone()
+            "INSERT INTO api_keys (id, customer_id, name, prefix, key_hash, kind, scope) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id, name, prefix, created_at, last_used_at, revoked_at",
+            (key_id, customer_id, name, secret[:PREFIX_DISPLAY_LEN], hash_key(secret), kind, scope)).fetchone()
     return {**_key_row(row), "secret": secret}
 
 
@@ -72,7 +74,7 @@ def list_keys(customer_id: str) -> List[Dict[str, Any]]:
     with pool().connection() as conn:
         rows = conn.execute(
             "SELECT id, name, prefix, created_at, last_used_at, revoked_at FROM api_keys "
-            "WHERE customer_id = %s ORDER BY created_at DESC", (customer_id,)).fetchall()
+            "WHERE customer_id = %s AND kind = 'customer' ORDER BY created_at DESC", (customer_id,)).fetchall()
     return [_key_row(r) for r in rows]
 
 
@@ -90,9 +92,9 @@ def revoke_key(customer_id: str, key_id: uuid.UUID) -> Optional[Dict[str, Any]]:
 def authenticate_key(secret: str) -> Optional[KeyOwner]:
     """Resolve a presented customer key to its owner; None if unknown or revoked."""
     with pool().connection() as conn:
-        row = conn.execute("SELECT customer_id, id FROM api_keys WHERE key_hash = %s AND revoked_at IS NULL",
-                           (hash_key(secret),)).fetchone()
-    return KeyOwner(customer_id=row[0], key_id=row[1]) if row else None
+        row = conn.execute("SELECT customer_id, id, kind, scope FROM api_keys "
+                           "WHERE key_hash = %s AND revoked_at IS NULL", (hash_key(secret),)).fetchone()
+    return KeyOwner(customer_id=row[0], key_id=row[1], kind=row[2], scope=row[3]) if row else None
 
 
 # -- usage -------------------------------------------------------------------

@@ -36,13 +36,14 @@ MANIFEST_SCHEMA: Dict[str, Any] = {
         "runtime": {
             "type": "object", "additionalProperties": False, "required": ["kind", "internal"],
             "properties": {
-                "kind": {"enum": ["inline", "python", "node"]},
+                "kind": {"enum": ["inline", "python", "node", "sandbox"]},  # sandbox: customer imports
                 "internal": {"type": "string"},          # the name inside the adapter's OPERATIONS
                 "module": {"type": "string"},            # inline / python: adapter module
                 "worker": {"type": "string"},            # python / node: worker process name (shared ok)
                 "script": {"type": "string"},            # node: worker script, relative to the repo root
                 "env": {"type": "object", "additionalProperties": {"type": "string"}},
                 "env_profile": {"enum": ["java"]},
+                "import_id": {"type": "string"},         # sandbox: the customer import it runs
             },
         },
         "timeouts": {
@@ -70,10 +71,10 @@ MANIFEST_SCHEMA: Dict[str, Any] = {
             "properties": {
                 "project": {"type": "string"}, "license": {"type": "string"},
                 "copyright": {"type": "string"}, "source": {"type": "string", "pattern": "^https://"},
-                "license_file": {"type": "string", "pattern": "^licenses/"},
+                "license_file": {"type": "string"},  # built-in operations: licenses/... (checked)
                 "dependency": {
                     "type": "object", "additionalProperties": False, "required": ["manager", "name", "version"],
-                    "properties": {"manager": {"enum": ["pip", "npm"]}, "name": {"type": "string"},
+                    "properties": {"manager": {"enum": ["pip", "npm", "github"]}, "name": {"type": "string"},
                                    "version": {"type": "string", "minLength": 1},
                                    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}},
                 },
@@ -132,7 +133,8 @@ def parse(raw: Dict[str, Any], path: Optional[str] = None) -> Capability:
     except jsonschema.SchemaError as exc:
         raise ManifestError(f"{where}: invalid schema: {exc.message}") from None
     rt = raw["runtime"]
-    need = {"inline": ["module"], "python": ["module", "worker"], "node": ["script", "worker"]}[rt["kind"]]
+    need = {"inline": ["module"], "python": ["module", "worker"], "node": ["script", "worker"],
+            "sandbox": ["import_id"]}[rt["kind"]]
     missing = [k for k in need if k not in rt]
     if missing:
         raise ManifestError(f"{where}: runtime kind '{rt['kind']}' needs {missing}")

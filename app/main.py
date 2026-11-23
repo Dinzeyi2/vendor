@@ -16,6 +16,7 @@ from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app import accounts, billing, catalog, db, router
+from app.imports import jobs as import_jobs, private as private_imports
 from app.account_api import router as account_router
 from app.billing_api import error_response, router as billing_router
 from app.errors import OperationError
@@ -34,14 +35,19 @@ async def lifespan(_app: FastAPI):
     loop = asyncio.get_running_loop()
     for name in warm_list():  # optional pre-start, in the background so /health is up immediately
         loop.run_in_executor(_executor, _warm, name)
-    maintenance = None
+    maintenance = importer = None
     if db.configured():  # migrate at boot; failures are retried on first use
         loop.run_in_executor(_executor, _init_db)
         maintenance = billing.Maintenance()  # heartbeat + release reservations of dead API processes
         maintenance.start()
+        if import_jobs.enabled():
+            importer = import_jobs.ImportWorker()  # customer GitHub imports, one at a time
+            importer.start()
     yield
     if maintenance is not None:
         maintenance.stop.set()
+    if importer is not None:
+        importer.stop.set()
     for worker in WORKERS.values():
         worker.kill()
     # Swap in a fresh pool so the app object stays usable if it is started again (tests).
@@ -68,6 +74,8 @@ def _warm(name: str) -> None:
 app = FastAPI(title="Cognex API", version="0.5.0", lifespan=lifespan)
 app.include_router(account_router)
 app.include_router(billing_router)
+from app.imports_api import router as imports_router  # noqa: E402
+app.include_router(imports_router)
 
 API_KEY_ENV = "API_KEY"
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -186,6 +194,12 @@ def list_operations(caller: Optional[Caller] = Depends(optional_caller)) -> Dict
                 "worker_unexpected_exits": WORKERS[spec.worker].exits if spec.worker else 0,
                 "worker_notes": list(WORKERS[spec.worker].notes) if spec.worker else []})
         ops.append(item)
+    if caller is not None and caller.owner is not None and caller.owner.kind == "customer":
+        for name, (cap, spec) in private_imports.capabilities_for(caller.owner.customer_id).items():
+            ops.append({"operation": name, "summary": cap.summary, "credits": catalog.CREDITS_PER_OPERATION,
+                        "default_timeout_s": spec.default_timeout, "max_timeout_s": spec.max_timeout,
+                        "input_schema": cap.input_schema, "private": True,
+                        "example": {"request": cap.example["request"], "data": cap.example["data"]}})
     return {"credits_per_operation": catalog.CREDITS_PER_OPERATION, "operations": ops,
             "open_source_acknowledgements": "/v1/open-source"}
 
@@ -217,9 +231,17 @@ class _Plan:
         return self.done is None
 
 
-def _plan(task: Task) -> _Plan:
+def _plan(task: Task, private: Optional[Dict[str, Any]] = None) -> _Plan:
+    private = private or {}
     if task.operation is not None:
         found = lookup(task.operation)
+        if found is None and task.operation in private:  # the caller's own imported operation
+            cap, spec = private[task.operation]
+            problem = router.validation_error(cap, task.inputs)
+            if problem:
+                return _Plan(task, echo=task.operation, done={"status": "error", "error_type": "invalid_input",
+                                                              "error": problem})
+            return _Plan(task, echo=task.operation, public=task.operation, spec=spec, inputs=task.inputs)
         if found is None:
             return _Plan(task, echo=task.operation, done={
                 "status": "error", "error_type": "unknown_operation",
@@ -232,12 +254,14 @@ def _plan(task: Task) -> _Plan:
                                                           "error": problem})
         return _Plan(task, echo=task.operation, public=public, spec=spec, inputs=task.inputs)
 
-    decision = router.route(task.request, task.data, CAPABILITIES.values())
+    caps = list(CAPABILITIES.values()) + [cap for cap, _ in private.values()]
+    decision = router.route(task.request, task.data, caps)
     if not decision.runnable:
         return _Plan(task, echo=decision.capability.name if decision.capability else None, done={
             "status": "needs_clarification", "question": decision.question, "options": decision.options})
     name = decision.capability.name
-    return _Plan(task, echo=name, public=name, spec=OPERATIONS[name], inputs=decision.inputs,
+    spec = OPERATIONS[name] if name in OPERATIONS else private[name][1]
+    return _Plan(task, echo=name, public=name, spec=spec, inputs=decision.inputs,
                  routing={"matched": decision.matched, "confidence": decision.confidence})
 
 
@@ -255,7 +279,9 @@ async def _run(plan: _Plan, diagnostics: bool, on_start: Optional[Callable[[], N
     timeout = min(task.timeout_s or spec.default_timeout, spec.max_timeout)
     loop = asyncio.get_running_loop()
     try:
-        if spec.inline is not None:
+        if spec.runner is not None:  # customer import: a fresh sandbox per call
+            output = await loop.run_in_executor(_executor, spec.runner, inputs, timeout, on_start)
+        elif spec.inline is not None:
             def run_inline():
                 if on_start is not None:
                     on_start()
@@ -302,10 +328,22 @@ async def execute(request: ExecuteRequest, caller: Caller = Depends(require_api_
     started = time.perf_counter()
     loop = asyncio.get_running_loop()
     reservation: Optional[billing.Reservation] = None
-    plans = await loop.run_in_executor(_executor, lambda: [_plan(t) for t in request.tasks])
+    owner = caller.owner
+    private: Dict[str, Any] = {}
+    if owner is not None and (owner.kind == "import_check" or any(
+            t.request is not None or lookup(t.operation) is None for t in request.tasks)):
+        try:
+            private = await loop.run_in_executor(_executor, private_imports.capabilities_for, owner.customer_id,
+                                                 owner.scope if owner.kind == "import_check" else None)
+        except db.DatabaseUnavailable:
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="key store unavailable") from None
+    if owner is not None and owner.kind == "import_check":  # Cognex's verification key: its one import only
+        if any(t.operation not in private for t in request.tasks):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, detail="this key may only call the import it verifies")
+    plans = await loop.run_in_executor(_executor, lambda: [_plan(t, private) for t in request.tasks])
     runnable = [p for p in plans if p.runnable]
     cost = len(runnable) * catalog.CREDITS_PER_OPERATION
-    if caller.owner is not None and cost and billing.enforced():
+    if owner is not None and owner.kind == "customer" and cost and billing.enforced():
         max_seconds = sum(min(p.task.timeout_s or p.spec.default_timeout, p.spec.max_timeout) for p in runnable) + 120
         try:
             reservation = await loop.run_in_executor(_executor, billing.reserve, caller.owner, cost, max_seconds)
@@ -325,12 +363,14 @@ async def execute(request: ExecuteRequest, caller: Caller = Depends(require_api_
             except Exception as exc:  # the sweeper settles it from the persisted start count
                 log.error("settling reservation %s failed: %s", reservation.id, type(exc).__name__)
                 charged = reservation.started
-    if caller.owner is not None:
-        await _record_usage(caller.owner, (time.perf_counter() - started) * 1000, results, charged)
+    if owner is not None and owner.kind == "customer":
+        await _record_usage(owner, (time.perf_counter() - started) * 1000, results, charged, private)
     return ExecuteResponse(results=results)
 
 
-def _usage_name(r: TaskResult) -> str:
+def _usage_name(r: TaskResult, private: Dict[str, Any]) -> str:
+    if r.operation and r.operation in private:
+        return r.operation
     if r.status == "needs_clarification" and (r.operation is None or lookup(r.operation) is None):
         return "router"
     found = lookup(r.operation) if r.operation else None
@@ -338,10 +378,10 @@ def _usage_name(r: TaskResult) -> str:
 
 
 async def _record_usage(owner: accounts.KeyOwner, duration_ms: float, results: List[TaskResult],
-                        credits_charged: int) -> None:
+                        credits_charged: int, private: Optional[Dict[str, Any]] = None) -> None:
     # Only the operation's public name (registered names only), outcome and timing are recorded:
     # never inputs, data, plain-English requests, outputs or questions.
-    entries = [{"operation": _usage_name(r), "status": r.status, "error_type": r.error_type,
+    entries = [{"operation": _usage_name(r, private or {}), "status": r.status, "error_type": r.error_type,
                 "duration_ms": r.duration_ms} for r in results]
     try:
         await asyncio.get_running_loop().run_in_executor(

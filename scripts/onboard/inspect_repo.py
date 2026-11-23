@@ -21,25 +21,11 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+from app.imports import licensing  # noqa: E402  (shared with customer imports)
 WORK = ROOT / ".onboarding"
 URL_RE = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$")
 
-LICENSES = [  # (spdx, permissive?, distinctive phrase)
-    ("AGPL-3.0", False, "GNU AFFERO GENERAL PUBLIC LICENSE"),
-    ("LGPL", False, "GNU LESSER GENERAL PUBLIC LICENSE"),
-    ("GPL", False, "GNU GENERAL PUBLIC LICENSE"),
-    ("SSPL", False, "Server Side Public License"),
-    ("BUSL", False, "Business Source License"),
-    ("CC-BY-NC", False, "NonCommercial"),
-    ("MPL-2.0", True, "Mozilla Public License"),
-    ("Apache-2.0", True, "Apache License"),
-    ("MIT", True, "Permission is hereby granted, free of charge"),
-    ("BSD-3-Clause", True, "Neither the name"),
-    ("BSD-2-Clause", True, "Redistributions in binary form must reproduce"),
-    ("ISC", True, "Permission to use, copy, modify, and/or distribute this software"),
-    ("Unlicense", True, "This is free and unencumbered software"),
-    ("Zlib", True, "This software is provided 'as-is'"),
-]
 DOC_DIRS = ("docs", "doc", "examples", "example", "tutorials", "notebooks", "demo", "samples")
 SKIP_DIRS = {".git", "node_modules", "build", "dist", "__pycache__", ".github", "vendor", "third_party", "tests", "test"}
 
@@ -60,31 +46,8 @@ def fetch(owner: str, repo: str, ref: str | None) -> Path:
     return dest
 
 
-def classify_license(text: str):
-    for spdx, permissive, phrase in LICENSES:
-        if phrase.lower() in text.lower():
-            return spdx, permissive
-    return "unknown", False
-
-
-def copyright_lines(text: str):
-    out = []
-    for line in text.splitlines():
-        s = line.strip()
-        if re.match(r"(?i)^copyright\b", s) and not re.search(r"\{|\[yyyy|owner\]|notice|license|holders", s, re.I):
-            out.append(s)
-    return out
-
-
 def licenses(repo: Path):
-    found = []
-    for p in sorted(repo.iterdir()):
-        if p.is_file() and re.match(r"(?i)^(licen[cs]e|copying|notice|copyright)", p.name):
-            text = p.read_text(encoding="utf-8", errors="replace")
-            spdx, permissive = classify_license(text) if not p.name.upper().startswith("NOTICE") else ("NOTICE", True)
-            found.append({"file": p.name, "spdx_guess": spdx, "permissive": permissive,
-                          "copyright_lines": copyright_lines(text), "bytes": p.stat().st_size})
-    return found
+    return [{k: v for k, v in f.items() if k != "text"} for f in licensing.license_files(repo)]
 
 
 def http_json(url: str):
