@@ -1,0 +1,119 @@
+{
+  "name": "image.extract_text",
+  "aliases": [
+    "paddleocr.ocr"
+  ],
+  "summary": "Read printed text in an image (OCR) and return each line with its confidence and bounding box.",
+  "intents": [
+    "read the text in this image",
+    "extract text from an image",
+    "ocr this picture",
+    "what does this image say",
+    "transcribe the words in a screenshot",
+    "scan a receipt and get the text",
+    "recognize printed text in a photo"
+  ],
+  "clarify": "Which image should I read? Send it as data: {\"image_base64\": \"<base64 PNG or JPEG>\"}.",
+  "runtime": {
+    "kind": "python",
+    "worker": "paddleocr",
+    "module": "app.ops.paddleocr_ops",
+    "internal": "paddleocr.ocr",
+    "env": {
+      "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK": "True"
+    }
+  },
+  "timeouts": {
+    "default": 120,
+    "max": 300
+  },
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "image_base64": {
+        "type": "string",
+        "minLength": 1,
+        "x-aliases": [
+          "image",
+          "png",
+          "jpeg",
+          "jpg",
+          "photo",
+          "picture",
+          "file",
+          "base64"
+        ],
+        "description": "The image (PNG, JPEG, ...) as base64, optionally as a data: URL. Up to 16 megapixels"
+      },
+      "lang": {
+        "enum": [
+          "en",
+          "ch",
+          "fr",
+          "german",
+          "es",
+          "it",
+          "pt",
+          "ru",
+          "japan",
+          "korean"
+        ],
+        "default": "en",
+        "x-aliases": [
+          "language"
+        ]
+      }
+    },
+    "required": [
+      "image_base64"
+    ]
+  },
+  "data_bindings": [
+    {
+      "when": {
+        "type": "string",
+        "minLength": 1
+      },
+      "inputs": {
+        "image_base64": ""
+      }
+    }
+  ],
+  "example": {
+    "request": "Read the text in this image",
+    "data": {
+      "image_base64": "iVBORw0KGgoAAAANSUhEUgAAAMgAAAAsAQAAAAAI9sqnAAABZklEQVR42u2TwUrDQBCG/00LBkFa78KuvoEXaaCYUDz4GH0C0SdIoKDX+gTtYwRBSEWoB6F9g65QaG5urIeNbDMe2sS0kIs3wf80MHzzz87sMEKFLPxnfpf5gMBXDOAt2MlYEOtwONyGKCFOyZiIeIPKsmABsAVAItyplm2qZd5OC7QkPkrGyjf0rvyec2c450REoIRcpIvINUSRixZTjYGb+8zaASbSAJNZ21PL8H3js2LohLJ5DaB/1Qn36kdna0dSaPvOgk80EX/NnHS8nG+6ZiQDQKAOCAA1G6aYAZiW0AaAZjBJ87D0nljAriOGTR5DpgpGkoTUCIzULKw1MioYBFoKG5gL27eNxjzImRNcim5kRXb3CWDic79g5CMQ99nUi/sPqJlpFOUMe25JR+Cm6Ry/eObg4l7m+3FH6UIRSV/R7WlquDtYT3RLmV/aXFmryr9jnf/EbOsayaIKhvWqmL9yJd+ZxNGFwTTURwAAAABJRU5ErkJggg=="
+    },
+    "inputs": {
+      "image_base64": "iVBORw0KGgoAAAANSUhEUgAAAMgAAAAsAQAAAAAI9sqnAAABZklEQVR42u2TwUrDQBCG/00LBkFa78KuvoEXaaCYUDz4GH0C0SdIoKDX+gTtYwRBSEWoB6F9g65QaG5urIeNbDMe2sS0kIs3wf80MHzzz87sMEKFLPxnfpf5gMBXDOAt2MlYEOtwONyGKCFOyZiIeIPKsmABsAVAItyplm2qZd5OC7QkPkrGyjf0rvyec2c450REoIRcpIvINUSRixZTjYGb+8zaASbSAJNZ21PL8H3js2LohLJ5DaB/1Qn36kdna0dSaPvOgk80EX/NnHS8nG+6ZiQDQKAOCAA1G6aYAZiW0AaAZjBJ87D0nljAriOGTR5DpgpGkoTUCIzULKw1MioYBFoKG5gL27eNxjzImRNcim5kRXb3CWDic79g5CMQ99nUi/sPqJlpFOUMe25JR+Cm6Ry/eObg4l7m+3FH6UIRSV/R7WlquDtYT3RLmV/aXFmryr9jnf/EbOsayaIKhvWqmL9yJd+ZxNGFwTTURwAAAABJRU5ErkJggg=="
+    },
+    "output": {
+      "lines": [
+        {
+          "text": "Hello Cognex",
+          "confidence": 0.9999,
+          "box": [
+            5,
+            7,
+            167,
+            39
+          ]
+        }
+      ],
+      "text": "Hello Cognex",
+      "lang": "en"
+    }
+  },
+  "built_on": {
+    "project": "PaddleOCR and its pretrained OCR models",
+    "license": "Apache-2.0",
+    "copyright": "Copyright (c) 2016 PaddlePaddle Authors. All Rights Reserved.",
+    "source": "https://github.com/PaddlePaddle/PaddleOCR",
+    "license_file": "licenses/PaddleOCR-Apache-2.0.txt",
+    "dependency": {
+      "manager": "pip",
+      "name": "paddleocr",
+      "version": "3.7.0"
+    }
+  }
+}

@@ -105,11 +105,12 @@ def record_usage(owner: KeyOwner, duration_ms: float, results: Sequence[Dict[str
     """
     request_id = uuid.uuid4()
     ok = sum(1 for r in results if r["status"] == "ok")
+    errors = sum(1 for r in results if r["status"] == "error")  # clarifications are neither
     with pool().connection() as conn:
         conn.execute(
             "INSERT INTO usage_requests (id, customer_id, key_id, task_count, ok_count, error_count, duration_ms, "
             "credits_charged) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-            (request_id, owner.customer_id, owner.key_id, len(results), ok, len(results) - ok, duration_ms,
+            (request_id, owner.customer_id, owner.key_id, len(results), ok, errors, duration_ms,
              credits_charged))
         with conn.cursor() as cur:
             cur.executemany(

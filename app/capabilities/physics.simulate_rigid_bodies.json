@@ -1,0 +1,282 @@
+{
+  "name": "physics.simulate_rigid_bodies",
+  "aliases": [
+    "rapier.simulate"
+  ],
+  "summary": "Simulate 3-D rigid bodies (balls, boxes, capsules) under gravity with collisions, and return their final state.",
+  "intents": [
+    "simulate a ball falling onto the ground",
+    "run a physics simulation",
+    "simulate objects colliding",
+    "where does the box land after falling",
+    "rigid body physics in 3d",
+    "drop these objects under gravity"
+  ],
+  "clarify": "Which bodies should I simulate? Send data like {\"bodies\": [{\"id\": \"ball\", \"type\": \"dynamic\", \"position\": [0, 5, 0], \"shape\": {\"type\": \"ball\", \"radius\": 0.5}}]}.",
+  "runtime": {
+    "kind": "node",
+    "worker": "rapier",
+    "script": "workers/rapier/worker.mjs",
+    "internal": "rapier.simulate"
+  },
+  "timeouts": {
+    "default": 30,
+    "max": 120
+  },
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "bodies": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 2000,
+        "x-aliases": [
+          "objects",
+          "scene"
+        ],
+        "items": {
+          "type": "object",
+          "required": [
+            "shape"
+          ],
+          "properties": {
+            "id": {
+              "description": "Your label for the body"
+            },
+            "type": {
+              "enum": [
+                "dynamic",
+                "fixed",
+                "kinematic"
+              ]
+            },
+            "position": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 3,
+              "items": {
+                "type": "number"
+              }
+            },
+            "linvel": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 3,
+              "items": {
+                "type": "number"
+              }
+            },
+            "angvel": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 3,
+              "items": {
+                "type": "number"
+              }
+            },
+            "shape": {
+              "type": "object",
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "enum": [
+                    "ball",
+                    "cuboid",
+                    "capsule"
+                  ]
+                }
+              }
+            },
+            "restitution": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "description": "Bounce"
+            },
+            "friction": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 10,
+              "description": "Friction"
+            },
+            "density": {
+              "type": "number",
+              "minimum": 1e-06,
+              "maximum": 1000000.0,
+              "description": "Density"
+            }
+          }
+        }
+      },
+      "steps": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 100000,
+        "description": "Simulation steps",
+        "default": 120
+      },
+      "timestep": {
+        "type": "number",
+        "minimum": 0.0001,
+        "maximum": 0.1,
+        "description": "Seconds per step",
+        "default": 0.016666666666666666
+      },
+      "gravity": {
+        "type": "array",
+        "minItems": 3,
+        "maxItems": 3,
+        "items": {
+          "type": "number"
+        }
+      },
+      "record_every": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100000,
+        "description": "Record a trajectory every N steps",
+        "default": 0
+      }
+    },
+    "required": [
+      "bodies"
+    ]
+  },
+  "engine_fields": [
+    "rapier_version"
+  ],
+  "example": {
+    "request": "Simulate a ball falling onto the ground",
+    "data": {
+      "bodies": [
+        {
+          "id": "ground",
+          "type": "fixed",
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "shape": {
+            "type": "cuboid",
+            "half_extents": [
+              10,
+              0.1,
+              10
+            ]
+          }
+        },
+        {
+          "id": "ball",
+          "type": "dynamic",
+          "position": [
+            0,
+            5,
+            0
+          ],
+          "shape": {
+            "type": "ball",
+            "radius": 0.5
+          }
+        }
+      ],
+      "steps": 240
+    },
+    "inputs": {
+      "bodies": [
+        {
+          "id": "ground",
+          "type": "fixed",
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "shape": {
+            "type": "cuboid",
+            "half_extents": [
+              10,
+              0.1,
+              10
+            ]
+          }
+        },
+        {
+          "id": "ball",
+          "type": "dynamic",
+          "position": [
+            0,
+            5,
+            0
+          ],
+          "shape": {
+            "type": "ball",
+            "radius": 0.5
+          }
+        }
+      ],
+      "steps": 240
+    },
+    "output": {
+      "steps": 240,
+      "timestep": 0.0167,
+      "simulated_time": 4,
+      "bodies": [
+        {
+          "id": "ground",
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "linvel": [
+            0,
+            0,
+            0
+          ],
+          "sleeping": false
+        },
+        {
+          "id": "ball",
+          "position": [
+            0,
+            0.5987,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0,
+            1
+          ],
+          "linvel": [
+            0,
+            0,
+            0
+          ],
+          "sleeping": true
+        }
+      ]
+    }
+  },
+  "built_on": {
+    "project": "Rapier",
+    "license": "Apache-2.0",
+    "copyright": "Copyright 2020 Sébastien Crozet",
+    "source": "https://github.com/dimforge/rapier",
+    "license_file": "licenses/Rapier-Apache-2.0.txt",
+    "dependency": {
+      "manager": "npm",
+      "name": "@dimforge/rapier3d-compat",
+      "version": "0.14.0"
+    }
+  }
+}

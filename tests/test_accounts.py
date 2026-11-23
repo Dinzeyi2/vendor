@@ -18,6 +18,11 @@ SERVER_SECRET = "test-website-backend-secret-" + "x" * 16
 OPERATOR_KEY = "operator-test-key"
 client = TestClient(app)
 
+# Minimal valid inputs (inputs are schema-checked before anything runs)
+LP = {"c": [1], "A": [[1]], "b": [1], "cone": {"l": 1}}
+XG = {"X": [[1]], "y": [1], "X_predict": [[1]]}
+PH = {"bodies": [{"shape": {"type": "ball", "radius": 1}}]}
+
 
 @pytest.fixture(scope="module")
 def database_url():
@@ -113,7 +118,7 @@ def test_usage_recorded_per_request_and_operation(monkeypatch):
     c = new_customer()
     k = create(c)
     r = execute(k["secret"], [FUZZ, {"id": "t2", "operation": "not.real", "inputs": {"secret": "zzz-input"}},
-                              {"id": "t3", "operation": "scs.solve", "inputs": {}}])
+                              {"id": "t3", "operation": "scs.solve", "inputs": LP}])
     assert r.status_code == 200
     by_id = {t["id"]: t for t in r.json()["results"]}
     assert by_id["t-Drift"]["status"] == "ok"
@@ -154,7 +159,7 @@ def test_operator_key_still_works_and_is_not_customer_usage():
 def test_customers_do_not_see_worker_internals():
     k = create(new_customer())["secret"]
     ops = client.get("/v1/operations", headers={"X-API-Key": k}).json()["operations"]
-    assert len(ops) == 10 and "worker_notes" not in ops[0] and "runs_in" not in ops[0]
+    assert len(ops) == 11 and "worker_notes" not in ops[0] and "runs_in" not in ops[0]
 
 
 def test_storage_holds_no_secrets_or_task_data(database_url):

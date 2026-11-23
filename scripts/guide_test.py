@@ -27,6 +27,7 @@ def ball_y(o):
 
 CHECKS = {
     "text.similarity": lambda o: abs(o["score"] - 96.296) < 0.01,
+    "text.rank_matches": lambda o: o["matches"][0]["choice"] == "John Smith",
     "vectors.nearest_neighbors": lambda o: o["labels"] == [[1, 0]],
     "tabular.train_and_predict": lambda o: o["predictions"] == [0, 1],
     "optimization.solve_convex": lambda o: o["status"] == "solved" and abs(o["x"][0] - 1.6) < 1e-4
@@ -48,7 +49,11 @@ def blocks(text: str, lang: str):
 def check_results(results) -> list[str]:
     problems = []
     for r in results:
-        op = r["operation"]
+        op = r.get("operation")
+        if r["status"] == "needs_clarification":  # the guide's clarification example: free, one question
+            if not (r.get("question") or "").strip() or "output" in r:
+                problems.append(f"{r['id']}: clarification without a question: {r}")
+            continue
         if r["status"] != "ok":
             problems.append(f"{r['id']} {op}: {r.get('error_type')}: {r.get('error')}")
         elif not CHECKS[op](r["output"]):
@@ -79,11 +84,14 @@ def main() -> None:
     results_ok = []
 
     curls = [b for b in blocks(text, "bash") if b.startswith("curl ")]
-    assert len(curls) == 12, f"expected 12 curl examples (quickstart + 10 operations + combined), found {len(curls)}"
+    want = 1 + len(CHECKS) + 3 + 1  # quickstart, one per operation, 3 plain-English, combined
+    assert len(curls) == want, f"expected {want} curl examples, found {len(curls)}"
     seen = set()
     for block in curls:
         ops = re.findall(r'"operation": "([a-z_.]+)"', block)
-        label = "curl " + (ops[0] if len(ops) == 1 else f"combined ({len(ops)} operations)")
+        asked = re.findall(r'"request": "([^"]+)"', block)
+        label = "curl " + (f"plain English: {asked[0]!r}" if asked and not ops else
+                           ops[0] if len(ops) == 1 else f"combined ({len(ops)} operations)")
         seen.update(ops)
         results_ok.append(run(label, [bash, "-c", block], lambda out: check_results(json.loads(out)["results"])))
     assert seen == set(CHECKS), f"operations without an example: {set(CHECKS) - seen}"

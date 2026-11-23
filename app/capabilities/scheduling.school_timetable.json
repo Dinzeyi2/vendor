@@ -1,0 +1,280 @@
+{
+  "name": "scheduling.school_timetable",
+  "aliases": [
+    "timefold.school_timetabling"
+  ],
+  "summary": "Assign lessons to timeslots and rooms with no room, teacher or student-group double-booking.",
+  "intents": [
+    "make a school timetable",
+    "schedule these lessons into rooms and timeslots",
+    "build a class schedule without conflicts",
+    "assign teachers lessons to time slots",
+    "timetabling for classes",
+    "plan the weekly lesson schedule"
+  ],
+  "clarify": "What are the timeslots, rooms and lessons? Send data like {\"timeslots\": [...], \"rooms\": [...], \"lessons\": [...]}.",
+  "runtime": {
+    "kind": "python",
+    "worker": "timefold",
+    "module": "app.ops.timefold_ops",
+    "internal": "timefold.school_timetabling",
+    "env_profile": "java"
+  },
+  "timeouts": {
+    "default": 60,
+    "max": 180
+  },
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "timeslots": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "object",
+          "required": [
+            "id",
+            "day_of_week",
+            "start_time",
+            "end_time"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "day_of_week": {
+              "type": "string"
+            },
+            "start_time": {
+              "type": "string"
+            },
+            "end_time": {
+              "type": "string"
+            }
+          }
+        },
+        "maxItems": 500,
+        "x-aliases": [
+          "slots",
+          "periods"
+        ]
+      },
+      "rooms": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "object",
+          "required": [
+            "id",
+            "name"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          }
+        },
+        "maxItems": 200,
+        "x-aliases": [
+          "classrooms"
+        ]
+      },
+      "lessons": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "object",
+          "required": [
+            "id",
+            "subject",
+            "teacher",
+            "student_group"
+          ],
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "subject": {
+              "type": "string"
+            },
+            "teacher": {
+              "type": "string"
+            },
+            "student_group": {
+              "type": "string"
+            }
+          }
+        },
+        "maxItems": 2000,
+        "x-aliases": [
+          "classes",
+          "courses"
+        ]
+      },
+      "time_limit_seconds": {
+        "type": "number",
+        "minimum": 1,
+        "maximum": 120,
+        "description": "How long to search",
+        "default": 5
+      }
+    },
+    "required": [
+      "timeslots",
+      "rooms",
+      "lessons"
+    ]
+  },
+  "example": {
+    "request": "Make a timetable for these lessons",
+    "data": {
+      "timeslots": [
+        {
+          "id": "mon-1",
+          "day_of_week": "MONDAY",
+          "start_time": "08:30",
+          "end_time": "09:30"
+        },
+        {
+          "id": "mon-2",
+          "day_of_week": "MONDAY",
+          "start_time": "09:30",
+          "end_time": "10:30"
+        }
+      ],
+      "rooms": [
+        {
+          "id": "a",
+          "name": "Room A"
+        },
+        {
+          "id": "b",
+          "name": "Room B"
+        }
+      ],
+      "lessons": [
+        {
+          "id": "math-9",
+          "subject": "Math",
+          "teacher": "A. Turing",
+          "student_group": "9th"
+        },
+        {
+          "id": "physics-9",
+          "subject": "Physics",
+          "teacher": "M. Curie",
+          "student_group": "9th"
+        },
+        {
+          "id": "chemistry-10",
+          "subject": "Chemistry",
+          "teacher": "M. Curie",
+          "student_group": "10th"
+        },
+        {
+          "id": "history-10",
+          "subject": "History",
+          "teacher": "I. Jones",
+          "student_group": "10th"
+        }
+      ],
+      "time_limit_seconds": 5
+    },
+    "inputs": {
+      "timeslots": [
+        {
+          "id": "mon-1",
+          "day_of_week": "MONDAY",
+          "start_time": "08:30",
+          "end_time": "09:30"
+        },
+        {
+          "id": "mon-2",
+          "day_of_week": "MONDAY",
+          "start_time": "09:30",
+          "end_time": "10:30"
+        }
+      ],
+      "rooms": [
+        {
+          "id": "a",
+          "name": "Room A"
+        },
+        {
+          "id": "b",
+          "name": "Room B"
+        }
+      ],
+      "lessons": [
+        {
+          "id": "math-9",
+          "subject": "Math",
+          "teacher": "A. Turing",
+          "student_group": "9th"
+        },
+        {
+          "id": "physics-9",
+          "subject": "Physics",
+          "teacher": "M. Curie",
+          "student_group": "9th"
+        },
+        {
+          "id": "chemistry-10",
+          "subject": "Chemistry",
+          "teacher": "M. Curie",
+          "student_group": "10th"
+        },
+        {
+          "id": "history-10",
+          "subject": "History",
+          "teacher": "I. Jones",
+          "student_group": "10th"
+        }
+      ],
+      "time_limit_seconds": 5
+    },
+    "output": {
+      "score": "0hard/0soft",
+      "hard_score": 0,
+      "soft_score": 0,
+      "feasible": true,
+      "assignments": [
+        {
+          "lesson_id": "math-9",
+          "timeslot_id": "mon-1",
+          "room_id": "b"
+        },
+        {
+          "lesson_id": "physics-9",
+          "timeslot_id": "mon-2",
+          "room_id": "a"
+        },
+        {
+          "lesson_id": "chemistry-10",
+          "timeslot_id": "mon-1",
+          "room_id": "a"
+        },
+        {
+          "lesson_id": "history-10",
+          "timeslot_id": "mon-2",
+          "room_id": "b"
+        }
+      ]
+    }
+  },
+  "built_on": {
+    "project": "Timefold Solver",
+    "license": "Apache-2.0",
+    "copyright": "Copyright Timefold BV and the Timefold Solver contributors",
+    "source": "https://github.com/TimefoldAI/timefold-solver",
+    "license_file": "licenses/TimefoldSolver-Apache-2.0.txt",
+    "dependency": {
+      "manager": "pip",
+      "name": "timefold",
+      "version": "1.24.0b0"
+    }
+  }
+}

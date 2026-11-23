@@ -1,0 +1,321 @@
+{
+  "name": "tabular.train_and_predict",
+  "aliases": [
+    "xgboost.train_predict"
+  ],
+  "summary": "Train a gradient-boosted tree model on your rows, then predict values or classes for new rows.",
+  "intents": [
+    "train a model and predict new rows",
+    "predict values for new rows from training data",
+    "classify these rows",
+    "machine learning prediction on tabular data",
+    "regression on my table",
+    "forecast the target for new records",
+    "predict whether a customer will upgrade",
+    "fit a model to X and y and predict"
+  ],
+  "clarify": "What are the training rows, their targets and the rows to predict? Send data like {\"X\": [[1, 2]], \"y\": [0], \"X_predict\": [[3, 4]]}.",
+  "runtime": {
+    "kind": "python",
+    "worker": "xgboost",
+    "module": "app.ops.xgboost_ops",
+    "internal": "xgboost.train_predict"
+  },
+  "timeouts": {
+    "default": 60,
+    "max": 300
+  },
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "X": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "number"
+          }
+        },
+        "description": "Training rows (features)",
+        "maxItems": 200000,
+        "x-aliases": [
+          "features",
+          "rows",
+          "train",
+          "x",
+          "training_rows"
+        ]
+      },
+      "y": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "number"
+        },
+        "description": "Target for each training row (classification: 0..k-1)",
+        "x-aliases": [
+          "target",
+          "targets",
+          "labels",
+          "outcome"
+        ]
+      },
+      "X_predict": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "number"
+          }
+        },
+        "description": "Rows to predict",
+        "maxItems": 200000,
+        "x-aliases": [
+          "predict",
+          "new_rows",
+          "test",
+          "x_new",
+          "rows_to_predict"
+        ]
+      },
+      "task": {
+        "enum": [
+          "regression",
+          "classification"
+        ],
+        "default": "regression"
+      },
+      "n_estimators": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 2000,
+        "description": "Number of trees",
+        "default": 100
+      },
+      "max_depth": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 16,
+        "description": "Maximum tree depth",
+        "default": 3
+      },
+      "learning_rate": {
+        "type": "number",
+        "minimum": 0.0001,
+        "maximum": 1,
+        "description": "Learning rate",
+        "default": 0.1
+      },
+      "random_state": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 2147483647,
+        "description": "Seed",
+        "default": 0
+      }
+    },
+    "required": [
+      "X",
+      "y",
+      "X_predict"
+    ]
+  },
+  "example": {
+    "request": "Train a model on these rows and predict the new ones",
+    "data": {
+      "task": "classification",
+      "X": [
+        [
+          1,
+          4
+        ],
+        [
+          2,
+          5
+        ],
+        [
+          2,
+          8
+        ],
+        [
+          3,
+          6
+        ],
+        [
+          4,
+          7
+        ],
+        [
+          5,
+          5
+        ],
+        [
+          6,
+          8
+        ],
+        [
+          7,
+          6
+        ],
+        [
+          8,
+          7
+        ],
+        [
+          9,
+          8
+        ],
+        [
+          1,
+          9
+        ],
+        [
+          8,
+          3
+        ]
+      ],
+      "y": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        1,
+        1,
+        0,
+        1
+      ],
+      "X_predict": [
+        [
+          1.5,
+          6
+        ],
+        [
+          8.5,
+          6
+        ]
+      ],
+      "n_estimators": 50
+    },
+    "inputs": {
+      "task": "classification",
+      "X": [
+        [
+          1,
+          4
+        ],
+        [
+          2,
+          5
+        ],
+        [
+          2,
+          8
+        ],
+        [
+          3,
+          6
+        ],
+        [
+          4,
+          7
+        ],
+        [
+          5,
+          5
+        ],
+        [
+          6,
+          8
+        ],
+        [
+          7,
+          6
+        ],
+        [
+          8,
+          7
+        ],
+        [
+          9,
+          8
+        ],
+        [
+          1,
+          9
+        ],
+        [
+          8,
+          3
+        ]
+      ],
+      "y": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        1,
+        1,
+        0,
+        1
+      ],
+      "X_predict": [
+        [
+          1.5,
+          6
+        ],
+        [
+          8.5,
+          6
+        ]
+      ],
+      "n_estimators": 50
+    },
+    "output": {
+      "task": "classification",
+      "n_train": 12,
+      "n_features": 2,
+      "predictions": [
+        0,
+        1
+      ],
+      "probabilities": [
+        [
+          0.7987,
+          0.2013
+        ],
+        [
+          0.2013,
+          0.7987
+        ]
+      ],
+      "feature_importances": [
+        1.0,
+        0.0
+      ]
+    }
+  },
+  "built_on": {
+    "project": "XGBoost",
+    "license": "Apache-2.0",
+    "copyright": "Copyright (c) 2019 by Contributors (XGBoost)",
+    "source": "https://github.com/dmlc/xgboost",
+    "license_file": "licenses/XGBoost-Apache-2.0.txt",
+    "dependency": {
+      "manager": "pip",
+      "name": "xgboost",
+      "version": "3.4.1"
+    }
+  }
+}

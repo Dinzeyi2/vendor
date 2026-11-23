@@ -7,46 +7,47 @@ their authors.
 
 | Cognex operation | Project | License | Copyright |
 |---|---|---|---|
-| `text.similarity` | [RapidFuzz](https://github.com/rapidfuzz/RapidFuzz) | MIT | Copyright (c) 2020-present Max Bachmann; Copyright (c) 2011 Adam Cohen |
-| `vectors.nearest_neighbors` | [hnswlib](https://github.com/nmslib/hnswlib) | Apache-2.0 | Copyright the hnswlib authors |
-| `tabular.train_and_predict` | [XGBoost](https://github.com/dmlc/xgboost) | Apache-2.0 | Copyright (c) 2019 by Contributors (XGBoost) |
-| `optimization.solve_convex` | [SCS](https://github.com/cvxgrp/scs) | MIT | Copyright (c) 2012 Brendan O'Donoghue |
 | `causal.estimate_effect` | [DoWhy](https://github.com/py-why/dowhy) | MIT | Copyright (c) PyWhy contributors |
 | `image.detect_edges` | [Kornia](https://github.com/kornia/kornia) | Apache-2.0 | Copyright the Kornia authors |
 | `image.extract_text` | [PaddleOCR and its pretrained OCR models](https://github.com/PaddlePaddle/PaddleOCR) | Apache-2.0 | Copyright (c) 2016 PaddlePaddle Authors. All Rights Reserved. |
 | `math.discover_equation` | [PySR](https://github.com/MilesCranmer/PySR) | Apache-2.0 | Copyright 2020 Miles Cranmer |
-| `scheduling.school_timetable` | [Timefold Solver](https://github.com/TimefoldAI/timefold-solver) | Apache-2.0 | Copyright Timefold BV and the Timefold Solver contributors |
+| `optimization.solve_convex` | [SCS](https://github.com/cvxgrp/scs) | MIT | Copyright (c) 2012 Brendan O'Donoghue |
 | `physics.simulate_rigid_bodies` | [Rapier](https://github.com/dimforge/rapier) | Apache-2.0 | Copyright 2020 Sébastien Crozet |
+| `scheduling.school_timetable` | [Timefold Solver](https://github.com/TimefoldAI/timefold-solver) | Apache-2.0 | Copyright Timefold BV and the Timefold Solver contributors |
+| `tabular.train_and_predict` | [XGBoost](https://github.com/dmlc/xgboost) | Apache-2.0 | Copyright (c) 2019 by Contributors (XGBoost) |
+| `text.rank_matches` | [RapidFuzz](https://github.com/rapidfuzz/RapidFuzz) | MIT | Copyright (c) 2020-present Max Bachmann; Copyright (c) 2011 Adam Cohen |
+| `text.similarity` | [RapidFuzz](https://github.com/rapidfuzz/RapidFuzz) | MIT | Copyright (c) 2020-present Max Bachmann; Copyright (c) 2011 Adam Cohen |
+| `vectors.nearest_neighbors` | [hnswlib](https://github.com/nmslib/hnswlib) | Apache-2.0 | Copyright the hnswlib authors |
 
 These projects are provided by their authors "as is", without warranties or conditions of any kind.
 The same list is available as JSON from `GET /v1/open-source`.
 
 ## MIT License notices
 
-### RapidFuzz
+### DoWhy
 
 ```text
-Copyright © 2020-present Max Bachmann
-Copyright © 2011 Adam Cohen
+    MIT License
 
-Permission is hereby granted, free of charge, to any person obtaining
-a copy of this software and associated documentation files (the
-"Software"), to deal in the Software without restriction, including
-without limitation the rights to use, copy, modify, merge, publish,
-distribute, sublicense, and/or sell copies of the Software, and to
-permit persons to whom the Software is furnished to do so, subject to
-the following conditions:
+    Copyright (c) PyWhy contributors. All rights reserved.
 
-The above copyright notice and this permission notice shall be
-included in all copies or substantial portions of the Software.
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
-NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
-LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
-WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE
 ```
 
 ### SCS
@@ -75,35 +76,35 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### DoWhy
+### RapidFuzz
 
 ```text
-    MIT License
+Copyright © 2020-present Max Bachmann
+Copyright © 2011 Adam Cohen
 
-    Copyright (c) PyWhy contributors. All rights reserved.
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
 
-    Permission is hereby granted, free of charge, to any person obtaining a copy
-    of this software and associated documentation files (the "Software"), to deal
-    in the Software without restriction, including without limitation the rights
-    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-    copies of the Software, and to permit persons to whom the Software is
-    furnished to do so, subject to the following conditions:
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
 
-    The above copyright notice and this permission notice shall be included in all
-    copies or substantial portions of the Software.
-
-    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-    SOFTWARE
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
 ## Apache License 2.0
 
-Used by: hnswlib, XGBoost, Kornia, PaddleOCR and its pretrained OCR models, PySR, Timefold Solver, Rapier.
+Used by: Kornia, PaddleOCR and its pretrained OCR models, PySR, Rapier, Timefold Solver, XGBoost, hnswlib.
 
 ```text
                                  Apache License

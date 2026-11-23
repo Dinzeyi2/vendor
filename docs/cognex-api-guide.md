@@ -1,6 +1,6 @@
 # Cognex API guide
 
-Cognex gives you ten algorithms behind one HTTP endpoint: text similarity, vector search, machine learning, optimization, causal inference, computer vision, OCR, equation discovery, scheduling and physics simulation. Send one task or many in a single request; each task costs 1 credit.
+Cognex gives you eleven algorithms behind one HTTP endpoint: text similarity and list matching, vector search, machine learning, optimization, causal inference, computer vision, OCR, equation discovery, scheduling and physics simulation. Name the operation you want, or just describe the task in plain English and send your data: Cognex picks the matching operation. Send one task or many in a single request; each task that runs costs 1 credit.
 
 ## Quickstart
 
@@ -87,8 +87,10 @@ The curl examples run in macOS and Linux terminals, WSL and Git Bash. On Windows
 | Field | Required | Description |
 |---|---|---|
 | `id` | yes | Your label for the task, unique within the request. It is returned with the result. |
-| `operation` | yes | One of the operation names below. |
-| `inputs` | yes | The operation's inputs (see each operation). |
+| `operation` | one of `operation` or `request` | One of the operation names below. |
+| `inputs` | with `operation` | The operation's inputs (see each operation). |
+| `request` | one of `operation` or `request` | What you want done, in plain English, e.g. `"Compare these two names"`. See [Plain-English requests](#plain-english-requests). |
+| `data` | with `request` | The data to work on, in any reasonable shape. |
 | `timeout_s` | no | Seconds to allow; defaults to the operation's default and is capped at its maximum. |
 
 All tasks in a request run in parallel. Results are returned in the same order as the tasks, and one failed task never fails the others.
@@ -111,7 +113,7 @@ A failed task has `"status": "error"` with `error_type` and `error` in place of 
 
 | `error_type` | Meaning | What to do |
 |---|---|---|
-| `invalid_input` | The inputs were missing or not valid for the operation. | Fix the inputs; the message says which one. |
+| `invalid_input` | The inputs were missing or not valid for the operation. | Fix the inputs; the message says which one. Missing fields and wrong types are caught before the task runs and aren't charged. |
 | `unknown_operation` | The operation name doesn't exist. | Check the name against the list below. Not charged. |
 | `timeout` | The task ran longer than its timeout. | Send a smaller problem or raise `timeout_s` (up to the maximum). |
 | `operation_failed` | The algorithm raised an error on these inputs. | Check that the inputs make sense for the problem. |
@@ -129,7 +131,7 @@ A failed task has `"status": "error"` with `error_type` and `error` in place of 
 
 ## Credits
 
-- **Each task costs 1 credit.** A request with 10 tasks costs 10 credits. A task with an unknown operation name costs nothing.
+- **Each task that runs costs 1 credit.** A request with 10 tasks costs 10 credits. These cost nothing: a task with an unknown operation name, a task whose inputs are missing fields or have the wrong types, and a plain-English request that Cognex answers with a question.
 - **The whole request is reserved before anything runs.** If your balance is lower than the request's cost, you get HTTP `402` and nothing runs:
 
   ```json
@@ -140,11 +142,136 @@ A failed task has `"status": "error"` with `error_type` and `error` in place of 
 - **Welcome credits are used first** and don't expire. **Purchased credits expire 12 months after purchase**; the ones expiring soonest are used first. Expired credits can't be used.
 - Your balance, next expiration date and usage per key are in your dashboard.
 
+## Plain-English requests
+
+If you don't want to look up operation names and input formats, describe the task in `request` and put your data in `data`. Cognex picks the matching operation, fits your data to its inputs, checks them, runs it and tells you which operation ran:
+
+```bash
+curl -sS https://vendor-production-41cd558f.up.railway.app/v1/execute \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $COGNEX_API_KEY" \
+  -d '{
+  "tasks": [
+    {
+      "id": "1",
+      "request": "Compare these two names",
+      "data": ["Drift Protein", "Drift Proteins"]
+    }
+  ]
+}'
+```
+
+```json
+{
+  "results": [
+    {
+      "id": "1",
+      "operation": "text.similarity",
+      "status": "ok",
+      "output": {"score": 96.2963, "scorer": "ratio"},
+      "routing": {"matched": "compare these two names", "confidence": 1.0},
+      "duration_ms": 0.2
+    }
+  ]
+}
+```
+
+`operation` is the operation that ran, and `routing.matched` is the phrase your request matched. A second example:
+
+```bash
+curl -sS https://vendor-production-41cd558f.up.railway.app/v1/execute \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $COGNEX_API_KEY" \
+  -d '{
+  "tasks": [
+    {
+      "id": "1",
+      "request": "Find the closest names in this list",
+      "data": {
+        "name": "Jon Smith",
+        "list": ["Jane Doe", "John Smith", "Jonathan Smythe", "J. Smith", "Bob Jones"]
+      }
+    }
+  ]
+}'
+```
+
+```json
+{
+  "results": [
+    {
+      "id": "1",
+      "operation": "text.rank_matches",
+      "status": "ok",
+      "output": {
+        "query": "Jon Smith",
+        "scorer": "WRatio",
+        "matches": [
+          {"choice": "John Smith", "score": 94.7368, "index": 1},
+          {"choice": "J. Smith", "score": 83.125, "index": 3},
+          {"choice": "Jonathan Smythe", "score": 66.6667, "index": 2},
+          {"choice": "Bob Jones", "score": 44.4444, "index": 4},
+          {"choice": "Jane Doe", "score": 35.2941, "index": 0}
+        ]
+      },
+      "routing": {"matched": "find the closest names in this list", "confidence": 1.0},
+      "duration_ms": 0.2
+    }
+  ]
+}
+```
+
+**When Cognex needs more information, it asks one short question instead of guessing.** It does this when the goal is unclear, when two operations fit equally well, or when data is missing. Nothing runs and nothing is charged:
+
+```bash
+curl -sS https://vendor-production-41cd558f.up.railway.app/v1/execute \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $COGNEX_API_KEY" \
+  -d '{
+  "tasks": [
+    {
+      "id": "1",
+      "request": "Find the closest names in this list",
+      "data": ["John Smith", "Jane Doe"]
+    }
+  ]
+}'
+```
+
+```json
+{
+  "results": [
+    {
+      "id": "1",
+      "operation": "text.rank_matches",
+      "status": "needs_clarification",
+      "question": "Which name should I look for, and in whi…",
+      "options": ["text.rank_matches"],
+      "duration_ms": 0.0
+    }
+  ]
+}
+```
+
+Answer by sending the request again with the missing data, or by naming the operation from `options` directly.
+
+Tips:
+
+- **`data` can take many shapes.** For example:
+  - a list of two strings, to compare them
+  - `{"name": ..., "list": [...]}`, to find matches in a list
+  - a base64 image, for the image operations
+  - the operation's exact inputs
+- **Key names are flexible.** Common synonyms are understood, such as `list` for `choices` or `image` for `image_base64`. The full input schema for each operation is in `GET /v1/operations`.
+- **Plain-English and named tasks can be mixed** in one request. For production code with a fixed task, naming the operation is faster and fully predictable.
+- **Requests are read in English.** Cognex only ever picks one of the operations listed below.
+
 ## Operations
 
 | Operation | What it does | Credits | Default / max timeout |
 |---|---|---|---|
 | [`text.similarity`](#textsimilarity) | Scores how similar two strings are (0 to 100) | 1 | 5 s / 10 s |
+| [`text.rank_matches`](#textrank_matches) | Ranks a list of strings by how well each matches a query | 1 | 10 s / 30 s |
 | [`vectors.nearest_neighbors`](#vectorsnearest_neighbors) | Finds the closest vectors to each query vector | 1 | 30 s / 120 s |
 | [`tabular.train_and_predict`](#tabulartrain_and_predict) | Trains a model on your rows and predicts new rows | 1 | 60 s / 300 s |
 | [`optimization.solve_convex`](#optimizationsolve_convex) | Solves linear, quadratic and conic optimization problems | 1 | 30 s / 300 s |
@@ -199,6 +326,63 @@ curl -sS https://vendor-production-41cd558f.up.railway.app/v1/execute \
 
 ---
 
+### `text.rank_matches`
+
+Ranks a list of strings by how closely each one matches a query string, best match first. Useful for looking up a customer or product name in a list, deduplication, and autocomplete with typos. Case and punctuation are ignored.
+
+| Input | Type | Description |
+|---|---|---|
+| `query` | string, required | The string to look for |
+| `choices` | list of strings, required | The list to search (up to 100,000 strings) |
+| `limit` | integer, default 5 | How many matches to return (1 to 1,000) |
+| `scorer` | string, default `"WRatio"` | `WRatio` (robust default), `ratio`, `partial_ratio` (best matching substring), `token_sort_ratio` (ignores word order) or `token_set_ratio` (ignores word order and duplicates) |
+| `score_cutoff` | number, default 0 | Only return matches scoring at least this (0 to 100) |
+
+Output: `matches`, best first. Each match has the `choice`, its `score` (0 to 100) and its `index` in `choices`.
+
+```bash
+curl -sS https://vendor-production-41cd558f.up.railway.app/v1/execute \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $COGNEX_API_KEY" \
+  -d '{
+  "tasks": [
+    {
+      "id": "1",
+      "operation": "text.rank_matches",
+      "inputs": {
+        "query": "Jon Smith",
+        "choices": ["Jane Doe", "John Smith", "Jonathan Smythe", "J. Smith", "Bob Jones"],
+        "limit": 3
+      }
+    }
+  ]
+}'
+```
+
+```json
+{
+  "results": [
+    {
+      "id": "1",
+      "operation": "text.rank_matches",
+      "status": "ok",
+      "output": {
+        "query": "Jon Smith",
+        "scorer": "WRatio",
+        "matches": [
+          {"choice": "John Smith", "score": 94.7368, "index": 1},
+          {"choice": "J. Smith", "score": 83.125, "index": 3},
+          {"choice": "Jonathan Smythe", "score": 66.6667, "index": 2}
+        ]
+      },
+      "duration_ms": 0.5
+    }
+  ]
+}
+```
+
+---
+
 ### `vectors.nearest_neighbors`
 
 Builds a search index over your vectors and returns the `k` nearest ones to each query, using approximate (HNSW) search. Useful for semantic search over embeddings, recommendations and similarity lookups.
@@ -236,7 +420,7 @@ curl -sS https://vendor-production-41cd558f.up.railway.app/v1/execute \
       "operation": "vectors.nearest_neighbors",
       "status": "ok",
       "output": {"labels": [[1, 0]], "distances": [[0.02, 0.82]], "space": "l2", "k": 2},
-      "duration_ms": 3.4
+      "duration_ms": 2.9
     }
   ]
 }
@@ -312,7 +496,7 @@ curl -sS https://vendor-production-41cd558f.up.railway.app/v1/execute \
         "probabilities": [[0.7987, 0.2013], [0.2013, 0.7987]],
         "feature_importances": [1.0, 0.0]
       },
-      "duration_ms": 199.0
+      "duration_ms": 3395.0
     }
   ]
 }
@@ -378,9 +562,9 @@ curl -sS https://vendor-production-41cd558f.up.railway.app/v1/execute \
         "objective": -2.8,
         "dual_objective": -2.8,
         "iterations": 50,
-        "solve_time_ms": 0.0985
+        "solve_time_ms": 0.1361
       },
-      "duration_ms": 1.6
+      "duration_ms": 1.5
     }
   ]
 }
@@ -444,7 +628,7 @@ curl -sS https://vendor-production-41cd558f.up.railway.app/v1/execute \
         "estimand_type": "EstimandType.NONPARAMETRIC_ATE",
         "n_rows": 24
       },
-      "duration_ms": 18.6
+      "duration_ms": 3134.6
     }
   ]
 }
@@ -499,7 +683,7 @@ curl -sS https://vendor-production-41cd558f.up.railway.app/v1/execute \
         "edge_fraction": 0.0399,
         "edges_png_base64": "iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAAAAABy…"
       },
-      "duration_ms": 20.5
+      "duration_ms": 22.8
     }
   ]
 }
@@ -551,7 +735,7 @@ curl -sS https://vendor-production-41cd558f.up.railway.app/v1/execute \
         "text": "Hello Cognex",
         "lang": "en"
       },
-      "duration_ms": 2704.0
+      "duration_ms": 4466.8
     }
   ]
 }
@@ -618,7 +802,7 @@ curl -sS https://vendor-production-41cd558f.up.railway.app/v1/execute \
         ],
         "feature_names": ["x0"]
       },
-      "duration_ms": 19147.2
+      "duration_ms": 5265.2
     }
   ]
 }
@@ -716,7 +900,7 @@ curl -sS https://vendor-production-41cd558f.up.railway.app/v1/execute \
           {"lesson_id": "history-10", "timeslot_id": "mon-2", "room_id": "b"}
         ]
       },
-      "duration_ms": 708.2
+      "duration_ms": 775.3
     }
   ]
 }
@@ -801,7 +985,7 @@ curl -sS https://vendor-production-41cd558f.up.railway.app/v1/execute \
           }
         ]
       },
-      "duration_ms": 25.3
+      "duration_ms": 22.3
     }
   ]
 }
@@ -809,9 +993,9 @@ curl -sS https://vendor-production-41cd558f.up.railway.app/v1/execute \
 
 ---
 
-## All ten operations in one request
+## All eleven operations in one request
 
-Tasks in one request run in parallel, so this returns about as fast as the slowest task (here `math.discover_equation`). It costs **10 credits**.
+Tasks in one request run in parallel, so this returns about as fast as the slowest task (here `math.discover_equation`). It costs **11 credits**.
 
 ```bash
 curl -sS https://vendor-production-41cd558f.up.railway.app/v1/execute \
@@ -823,6 +1007,15 @@ curl -sS https://vendor-production-41cd558f.up.railway.app/v1/execute \
       "id": "similarity",
       "operation": "text.similarity",
       "inputs": {"a": "Drift Protein", "b": "Drift Proteins"}
+    },
+    {
+      "id": "closest",
+      "operation": "text.rank_matches",
+      "inputs": {
+        "query": "Jon Smith",
+        "choices": ["Jane Doe", "John Smith", "Jonathan Smythe", "J. Smith", "Bob Jones"],
+        "limit": 3
+      }
     },
     {
       "id": "neighbors",
@@ -983,61 +1176,67 @@ Response (outputs left out for brevity; each one matches the examples above):
       "id": "similarity",
       "operation": "text.similarity",
       "status": "ok",
-      "duration_ms": 1.4
+      "duration_ms": 2.5
+    },
+    {
+      "id": "closest",
+      "operation": "text.rank_matches",
+      "status": "ok",
+      "duration_ms": 2.5
     },
     {
       "id": "neighbors",
       "operation": "vectors.nearest_neighbors",
       "status": "ok",
-      "duration_ms": 3.6
+      "duration_ms": 3.3
     },
     {
       "id": "prediction",
       "operation": "tabular.train_and_predict",
       "status": "ok",
-      "duration_ms": 30.8
+      "duration_ms": 15.2
     },
     {
       "id": "optimization",
       "operation": "optimization.solve_convex",
       "status": "ok",
-      "duration_ms": 3.2
+      "duration_ms": 2.5
     },
     {
       "id": "causal-effect",
       "operation": "causal.estimate_effect",
       "status": "ok",
-      "duration_ms": 17.4
+      "duration_ms": 15.5
     },
     {
       "id": "edges",
       "operation": "image.detect_edges",
       "status": "ok",
-      "duration_ms": 19.9
+      "duration_ms": 10.7
     },
     {
       "id": "ocr",
       "operation": "image.extract_text",
       "status": "ok",
-      "duration_ms": 640.2
+      "duration_ms": 506.1
     },
     {
       "id": "equation",
       "operation": "math.discover_equation",
       "status": "ok",
-      "duration_ms": 552.5
+      "duration_ms": 468.9
     },
     {
       "id": "timetable",
       "operation": "scheduling.school_timetable",
       "status": "ok",
-      "duration_ms": 41.0
+      "duration_ms": 35.7
     },
     {
       "id": "physics",
       "operation": "physics.simulate_rigid_bodies",
       "status": "ok",
-      "duration_ms": 5.9
+      "duration_ms": 4.1
     }
   ]
 }

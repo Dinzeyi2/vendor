@@ -13,13 +13,13 @@ from typing import Any, Callable, Dict, List, Literal, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Security, status
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-from app import accounts, billing, catalog, db
+from app import accounts, billing, catalog, db, router
 from app.account_api import router as account_router
 from app.billing_api import error_response, router as billing_router
 from app.errors import OperationError
-from app.registry import OPERATIONS, WORKERS, lookup, warm_list
+from app.registry import CAPABILITIES, OPERATIONS, WORKERS, lookup, warm_list
 from app.workers import WorkerFailure
 
 log = logging.getLogger("uvicorn.error")
@@ -103,10 +103,24 @@ def require_api_key(provided: Optional[str] = Security(_api_key_header)) -> Call
 
 
 class Task(BaseModel):
+    """Either name an operation (`operation` + `inputs`) or describe the goal in plain English
+    (`request` + `data`) and let Cognex pick the matching registered operation."""
     id: str
-    operation: str = Field(description="A Cognex operation name from GET /v1/operations, e.g. text.similarity")
+    operation: Optional[str] = Field(default=None, description="A Cognex operation name from GET /v1/operations, "
+                                                               "e.g. text.similarity")
     inputs: Dict[str, Any] = Field(default_factory=dict)
+    request: Optional[str] = Field(default=None, min_length=1, max_length=router.MAX_REQUEST_CHARS,
+                                   description="Plain-English goal, e.g. 'Compare these two names' (instead of operation)")
+    data: Any = Field(default=None, description="The data for a plain-English request, in any reasonable shape")
     timeout_s: Optional[float] = Field(default=None, gt=0, description="Override the operation's default timeout (capped).")
+
+    @model_validator(mode="after")
+    def operation_or_request(self) -> "Task":
+        if (self.operation is None) == (self.request is None):
+            raise ValueError("give either 'operation' (with 'inputs') or 'request' (with 'data'), not both")
+        if self.request is not None and self.data is None and self.inputs:
+            self.data = self.inputs  # plain-English request that put its data in 'inputs'
+        return self
 
 
 class ExecuteRequest(BaseModel):
@@ -125,11 +139,14 @@ ErrorType = Literal["unknown_operation", "invalid_input", "operation_failed", "t
 
 class TaskResult(BaseModel):
     id: str
-    operation: str
-    status: Literal["ok", "error"]
+    operation: Optional[str] = None   # the operation that ran (for plain-English requests: the one chosen)
+    status: Literal["ok", "error", "needs_clarification"]
     output: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     error_type: Optional[ErrorType] = None
+    question: Optional[str] = None    # needs_clarification: one short question; nothing ran or was charged
+    options: Optional[List[str]] = None
+    routing: Optional[Dict[str, Any]] = None  # plain-English requests: why this operation was chosen
     duration_ms: float
 
 
@@ -158,6 +175,9 @@ def list_operations(caller: Optional[Caller] = Depends(optional_caller)) -> Dict
         item: Dict[str, Any] = {"operation": name, "summary": meta.summary if meta else "",
                                 "credits": catalog.CREDITS_PER_OPERATION,
                                 "default_timeout_s": spec.default_timeout, "max_timeout_s": spec.max_timeout}
+        if meta:  # what it accepts, and a plain-English request that routes to it
+            item["input_schema"] = meta.input_schema
+            item["example"] = {"request": meta.example["request"], "data": meta.example["data"]}
         if operator:  # aliases and worker internals are for the operator only
             item.update({
                 "aliases": [a for a, n in catalog.ALIASES.items() if n == name],
@@ -181,18 +201,57 @@ def open_source() -> Dict[str, Any]:
 _STDERR_MARKER = "; last stderr:"
 
 
-async def _run(task: Task, diagnostics: bool, on_start: Optional[Callable[[], None]] = None) -> TaskResult:
+@dataclass
+class _Plan:
+    """A task after routing and input validation, before anything runs or is charged."""
+    task: Task
+    echo: Optional[str] = None          # operation name to report (what the caller sent, or the chosen one)
+    public: Optional[str] = None
+    spec: Any = None
+    inputs: Optional[Dict[str, Any]] = None
+    routing: Optional[Dict[str, Any]] = None
+    done: Optional[Dict[str, Any]] = None  # answered without running: error or clarification (free)
+
+    @property
+    def runnable(self) -> bool:
+        return self.done is None
+
+
+def _plan(task: Task) -> _Plan:
+    if task.operation is not None:
+        found = lookup(task.operation)
+        if found is None:
+            return _Plan(task, echo=task.operation, done={
+                "status": "error", "error_type": "unknown_operation",
+                "error": f"unknown operation '{task.operation}'; see GET /v1/operations"})
+        public, spec = found
+        cap = CAPABILITIES.get(public)
+        problem = router.validation_error(cap, task.inputs) if cap else None
+        if problem:  # rejected before running, so not charged
+            return _Plan(task, echo=task.operation, done={"status": "error", "error_type": "invalid_input",
+                                                          "error": problem})
+        return _Plan(task, echo=task.operation, public=public, spec=spec, inputs=task.inputs)
+
+    decision = router.route(task.request, task.data, CAPABILITIES.values())
+    if not decision.runnable:
+        return _Plan(task, echo=decision.capability.name if decision.capability else None, done={
+            "status": "needs_clarification", "question": decision.question, "options": decision.options})
+    name = decision.capability.name
+    return _Plan(task, echo=name, public=name, spec=OPERATIONS[name], inputs=decision.inputs,
+                 routing={"matched": decision.matched, "confidence": decision.confidence})
+
+
+async def _run(plan: _Plan, diagnostics: bool, on_start: Optional[Callable[[], None]] = None) -> TaskResult:
     started = time.perf_counter()
+    task = plan.task
 
     def result(**kw) -> TaskResult:
-        return TaskResult(id=task.id, operation=task.operation,
+        return TaskResult(id=task.id, operation=plan.echo, routing=plan.routing,
                           duration_ms=round((time.perf_counter() - started) * 1000, 1), **kw)
 
-    found = lookup(task.operation)
-    if found is None:
-        return result(status="error", error_type="unknown_operation",
-                      error=f"unknown operation '{task.operation}'; see GET /v1/operations")
-    public, spec = found
+    if plan.done is not None:
+        return result(**plan.done)
+    public, spec, inputs = plan.public, plan.spec, plan.inputs
     timeout = min(task.timeout_s or spec.default_timeout, spec.max_timeout)
     loop = asyncio.get_running_loop()
     try:
@@ -200,12 +259,12 @@ async def _run(task: Task, diagnostics: bool, on_start: Optional[Callable[[], No
             def run_inline():
                 if on_start is not None:
                     on_start()
-                return spec.inline(task.inputs)
+                return spec.inline(inputs)
             output = await asyncio.wait_for(loop.run_in_executor(_executor, run_inline), timeout)
         else:
             output = await loop.run_in_executor(_executor, WORKERS[spec.worker].call,
-                                                spec.internal or public, task.inputs, timeout, on_start)
-        if task.operation == public:  # engine-specific fields are only kept for the original names
+                                                spec.internal or public, inputs, timeout, on_start)
+        if plan.echo == public:  # engine-specific fields are only kept for the original names
             for key in catalog.ENGINE_FIELDS.get(public, ()):
                 output.pop(key, None)
         return result(status="ok", output=output)
@@ -230,18 +289,24 @@ async def _run(task: Task, diagnostics: bool, on_start: Optional[Callable[[], No
 async def execute(request: ExecuteRequest, caller: Caller = Depends(require_api_key)):
     """Run all tasks concurrently; tasks for the same library are queued on that library's worker.
 
-    Customer keys (when BILLING_MODE=on): 1 credit per known operation (public name or alias). The full batch
+    A task names an operation, or gives a plain-English `request` plus `data`; Cognex then picks
+    a registered operation or answers with one short question (status needs_clarification).
+    Every task is routed and its inputs validated before anything runs.
+
+    Customer keys (when BILLING_MODE=on): 1 credit per operation that will run. The full batch
     cost is reserved atomically before any work starts (402 insufficient_credits otherwise);
-    operations that never start are refunded. Unknown operations are rejected free of charge.
-    Calls made with a customer key are recorded as usage. The operator key is never charged.
+    operations that never start are refunded. Clarifications, unknown operations and inputs that
+    fail validation are free. Calls made with a customer key are recorded as usage. The operator
+    key is never charged.
     """
     started = time.perf_counter()
     loop = asyncio.get_running_loop()
     reservation: Optional[billing.Reservation] = None
-    known = [(t, found[1]) for t in request.tasks if (found := lookup(t.operation))]
-    cost = len(known) * catalog.CREDITS_PER_OPERATION
+    plans = await loop.run_in_executor(_executor, lambda: [_plan(t) for t in request.tasks])
+    runnable = [p for p in plans if p.runnable]
+    cost = len(runnable) * catalog.CREDITS_PER_OPERATION
     if caller.owner is not None and cost and billing.enforced():
-        max_seconds = sum(min(t.timeout_s or spec.default_timeout, spec.max_timeout) for t, spec in known) + 120
+        max_seconds = sum(min(p.task.timeout_s or p.spec.default_timeout, p.spec.max_timeout) for p in runnable) + 120
         try:
             reservation = await loop.run_in_executor(_executor, billing.reserve, caller.owner, cost, max_seconds)
         except billing.BillingError as exc:
@@ -252,7 +317,7 @@ async def execute(request: ExecuteRequest, caller: Caller = Depends(require_api_
     charged = 0
     try:
         on_start = reservation.mark_started if reservation else None
-        results = list(await asyncio.gather(*(_run(t, caller.kind == "operator", on_start) for t in request.tasks)))
+        results = list(await asyncio.gather(*(_run(p, caller.kind == "operator", on_start) for p in plans)))
     finally:
         if reservation is not None:  # charge started operations, release the rest (also on errors)
             try:
@@ -265,12 +330,19 @@ async def execute(request: ExecuteRequest, caller: Caller = Depends(require_api_
     return ExecuteResponse(results=results)
 
 
+def _usage_name(r: TaskResult) -> str:
+    if r.status == "needs_clarification" and (r.operation is None or lookup(r.operation) is None):
+        return "router"
+    found = lookup(r.operation) if r.operation else None
+    return found[0] if found else "unknown"
+
+
 async def _record_usage(owner: accounts.KeyOwner, duration_ms: float, results: List[TaskResult],
                         credits_charged: int) -> None:
-    # Only the operation's public name (registered names only), outcome and timing are recorded.
-    entries = [{"operation": found[0] if (found := lookup(r.operation)) else "unknown",
-                "status": r.status, "error_type": r.error_type, "duration_ms": r.duration_ms}
-               for r in results]
+    # Only the operation's public name (registered names only), outcome and timing are recorded:
+    # never inputs, data, plain-English requests, outputs or questions.
+    entries = [{"operation": _usage_name(r), "status": r.status, "error_type": r.error_type,
+                "duration_ms": r.duration_ms} for r in results]
     try:
         await asyncio.get_running_loop().run_in_executor(
             _executor, accounts.record_usage, owner, round(duration_ms, 1), entries, credits_charged)

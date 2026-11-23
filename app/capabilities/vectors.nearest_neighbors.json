@@ -1,0 +1,204 @@
+{
+  "name": "vectors.nearest_neighbors",
+  "aliases": [
+    "hnswlib.knn_query"
+  ],
+  "summary": "Find the k nearest vectors to each query vector (approximate search; l2, inner product or cosine).",
+  "intents": [
+    "find the nearest vectors",
+    "find the closest embeddings to this query vector",
+    "k nearest neighbors search",
+    "semantic search over embeddings",
+    "which points are closest to this point",
+    "vector similarity search",
+    "nearest neighbour lookup for vectors",
+    "recommend similar items from embedding vectors"
+  ],
+  "clarify": "Which vectors should I search, and what is the query vector? Send data like {\"vectors\": [[0, 0], [1, 0]], \"queries\": [[0.9, 0.1]], \"k\": 1}.",
+  "runtime": {
+    "kind": "python",
+    "worker": "hnswlib",
+    "module": "app.ops.hnswlib_ops",
+    "internal": "hnswlib.knn_query"
+  },
+  "timeouts": {
+    "default": 30,
+    "max": 120
+  },
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "vectors": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "number"
+          }
+        },
+        "description": "The vectors to search, all the same length",
+        "maxItems": 200000,
+        "x-aliases": [
+          "embeddings",
+          "points",
+          "items",
+          "data",
+          "index"
+        ]
+      },
+      "queries": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "number"
+          }
+        },
+        "description": "Vectors to find neighbours for",
+        "maxItems": 10000,
+        "x-aliases": [
+          "query",
+          "targets",
+          "query_vectors"
+        ]
+      },
+      "k": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 200000,
+        "description": "Neighbours to return per query",
+        "default": 1
+      },
+      "space": {
+        "enum": [
+          "l2",
+          "ip",
+          "cosine"
+        ],
+        "default": "l2",
+        "description": "Distance: l2, ip (inner product) or cosine"
+      },
+      "ids": {
+        "type": "array",
+        "items": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "description": "Your ids, one per vector"
+      },
+      "M": {
+        "type": "integer",
+        "minimum": 2,
+        "maximum": 100,
+        "description": "Graph degree",
+        "default": 16
+      },
+      "ef_construction": {
+        "type": "integer",
+        "minimum": 10,
+        "maximum": 2000,
+        "description": "Build-time accuracy",
+        "default": 200
+      },
+      "ef": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 5000,
+        "description": "Query-time accuracy"
+      }
+    },
+    "required": [
+      "vectors",
+      "queries"
+    ]
+  },
+  "example": {
+    "request": "Find the 2 nearest vectors to my query",
+    "data": {
+      "vectors": [
+        [
+          0,
+          0
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          5,
+          5
+        ]
+      ],
+      "queries": [
+        [
+          0.9,
+          0.1
+        ]
+      ],
+      "k": 2
+    },
+    "inputs": {
+      "vectors": [
+        [
+          0,
+          0
+        ],
+        [
+          1,
+          0
+        ],
+        [
+          0,
+          1
+        ],
+        [
+          5,
+          5
+        ]
+      ],
+      "queries": [
+        [
+          0.9,
+          0.1
+        ]
+      ],
+      "k": 2
+    },
+    "output": {
+      "labels": [
+        [
+          1,
+          0
+        ]
+      ],
+      "distances": [
+        [
+          0.02,
+          0.82
+        ]
+      ],
+      "space": "l2",
+      "k": 2
+    }
+  },
+  "built_on": {
+    "project": "hnswlib",
+    "license": "Apache-2.0",
+    "copyright": "Copyright the hnswlib authors",
+    "source": "https://github.com/nmslib/hnswlib",
+    "license_file": "licenses/hnswlib-Apache-2.0.txt",
+    "dependency": {
+      "manager": "pip",
+      "name": "hnswlib",
+      "version": "0.8.0"
+    }
+  }
+}

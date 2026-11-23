@@ -1,0 +1,149 @@
+{
+  "name": "text.similarity",
+  "aliases": [
+    "rapidfuzz.compare"
+  ],
+  "summary": "Score how similar two strings are, 0-100 (normalized Indel similarity).",
+  "intents": [
+    "compare these two names",
+    "compare two strings",
+    "how similar are these two names",
+    "how similar are these strings",
+    "similarity score between two texts",
+    "are these two names the same",
+    "do these two product names match",
+    "check if two strings are a fuzzy match",
+    "measure the difference between two words",
+    "string similarity of a and b"
+  ],
+  "clarify": "Which two strings should I compare? Send them as data: [\"first\", \"second\"].",
+  "runtime": {
+    "kind": "inline",
+    "module": "app.ops.rapidfuzz_ops",
+    "internal": "rapidfuzz.compare"
+  },
+  "timeouts": {
+    "default": 5,
+    "max": 10
+  },
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "a": {
+        "type": "string",
+        "description": "First string",
+        "x-aliases": [
+          "first",
+          "left",
+          "name1",
+          "string1",
+          "text1",
+          "source"
+        ]
+      },
+      "b": {
+        "type": "string",
+        "description": "Second string",
+        "x-aliases": [
+          "second",
+          "right",
+          "name2",
+          "string2",
+          "text2",
+          "target"
+        ]
+      }
+    },
+    "required": [
+      "a",
+      "b"
+    ]
+  },
+  "data_bindings": [
+    {
+      "when": {
+        "type": "array",
+        "minItems": 2,
+        "maxItems": 2,
+        "items": {
+          "type": "string"
+        }
+      },
+      "inputs": {
+        "a": "/0",
+        "b": "/1"
+      }
+    },
+    {
+      "when": {
+        "type": "object",
+        "required": [
+          "names"
+        ],
+        "properties": {
+          "names": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "inputs": {
+        "a": "/names/0",
+        "b": "/names/1"
+      }
+    },
+    {
+      "when": {
+        "type": "object",
+        "required": [
+          "strings"
+        ],
+        "properties": {
+          "strings": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "inputs": {
+        "a": "/strings/0",
+        "b": "/strings/1"
+      }
+    }
+  ],
+  "example": {
+    "request": "Compare these two names",
+    "data": [
+      "Drift Protein",
+      "Drift Proteins"
+    ],
+    "inputs": {
+      "a": "Drift Protein",
+      "b": "Drift Proteins"
+    },
+    "output": {
+      "score": 96.2963,
+      "scorer": "ratio"
+    }
+  },
+  "built_on": {
+    "project": "RapidFuzz",
+    "license": "MIT",
+    "copyright": "Copyright (c) 2020-present Max Bachmann; Copyright (c) 2011 Adam Cohen",
+    "source": "https://github.com/rapidfuzz/RapidFuzz",
+    "license_file": "licenses/RapidFuzz-MIT.txt",
+    "dependency": {
+      "manager": "pip",
+      "name": "rapidfuzz",
+      "version": "3.14.6"
+    }
+  }
+}

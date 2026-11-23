@@ -1,0 +1,151 @@
+{
+  "name": "text.rank_matches",
+  "summary": "Rank a list of strings by how closely each one matches a query string, best match first.",
+  "intents": [
+    "find the closest names in this list",
+    "find the closest match in a list",
+    "which names in the list match best",
+    "rank these names by similarity to a name",
+    "fuzzy search a list of strings",
+    "look up a name in a list",
+    "find the best matching product name from a list",
+    "match a name against a list of candidates",
+    "which of these options is most similar",
+    "top matches for a name in a list",
+    "deduplicate a name against a list"
+  ],
+  "clarify": "Which name should I look for, and in which list? Send data like {\"query\": \"Jon Smith\", \"choices\": [\"John Smith\", \"Jane Doe\"]}.",
+  "runtime": {
+    "kind": "inline",
+    "module": "app.ops.rapidfuzz_ops",
+    "internal": "rapidfuzz.extract"
+  },
+  "timeouts": {
+    "default": 10,
+    "max": 30
+  },
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "The string to look for",
+        "x-aliases": [
+          "name",
+          "target",
+          "search",
+          "text",
+          "lookup",
+          "value",
+          "string",
+          "term"
+        ]
+      },
+      "choices": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 100000,
+        "items": {
+          "type": "string"
+        },
+        "description": "The list to search (up to 100,000 strings)",
+        "x-aliases": [
+          "list",
+          "names",
+          "candidates",
+          "options",
+          "items",
+          "values",
+          "strings",
+          "in"
+        ]
+      },
+      "limit": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1000,
+        "description": "How many matches to return",
+        "default": 5
+      },
+      "scorer": {
+        "enum": [
+          "WRatio",
+          "ratio",
+          "partial_ratio",
+          "token_sort_ratio",
+          "token_set_ratio"
+        ],
+        "default": "WRatio",
+        "description": "Similarity measure: WRatio (default, robust), ratio, partial_ratio, token_sort_ratio, token_set_ratio"
+      },
+      "score_cutoff": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 100,
+        "description": "Only return matches scoring at least this (0-100)",
+        "default": 0
+      }
+    },
+    "required": [
+      "query",
+      "choices"
+    ]
+  },
+  "data_bindings": [
+    {
+      "when": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "inputs": {
+        "choices": ""
+      }
+    }
+  ],
+  "example": {
+    "request": "Find the closest names in this list",
+    "data": {
+      "name": "Jon Smith",
+      "list": [
+        "John Smith",
+        "Jane Doe",
+        "Jonathan Smythe",
+        "J. Smith"
+      ]
+    },
+    "inputs": {
+      "query": "Jon Smith",
+      "choices": [
+        "John Smith",
+        "Jane Doe",
+        "Jonathan Smythe",
+        "J. Smith"
+      ]
+    },
+    "output": {
+      "query": "Jon Smith",
+      "scorer": "WRatio",
+      "matches": [
+        {
+          "choice": "John Smith",
+          "score": 94.7368,
+          "index": 0
+        }
+      ]
+    }
+  },
+  "built_on": {
+    "project": "RapidFuzz",
+    "license": "MIT",
+    "copyright": "Copyright (c) 2020-present Max Bachmann; Copyright (c) 2011 Adam Cohen",
+    "source": "https://github.com/rapidfuzz/RapidFuzz",
+    "license_file": "licenses/RapidFuzz-MIT.txt",
+    "dependency": {
+      "manager": "pip",
+      "name": "rapidfuzz",
+      "version": "3.14.6"
+    }
+  }
+}

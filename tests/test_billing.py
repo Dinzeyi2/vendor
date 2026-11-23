@@ -29,6 +29,11 @@ GRANT_SECRET = "test-credits-grant-secret-" + "g" * 16
 OPERATOR_KEY = "operator-test-key"
 client = TestClient(app)
 
+# Minimal valid inputs (inputs are schema-checked before anything runs)
+LP = {"c": [1], "A": [[1]], "b": [1], "cone": {"l": 1}}
+XG = {"X": [[1]], "y": [1], "X_predict": [[1]]}
+PH = {"bodies": [{"shape": {"type": "ball", "radius": 1}}]}
+
 
 @pytest.fixture(scope="module")
 def database_url():
@@ -305,8 +310,8 @@ def test_started_failures_are_charged_and_unstarted_work_is_refunded(monkeypatch
     c = new_customer()
     k = new_key(c)["secret"]
     pay(c, 5)
-    r = execute(k, [{"id": "a", "operation": "scs.solve", "inputs": {}},
-                    {"id": "b", "operation": "xgboost.train_predict", "inputs": {}},
+    r = execute(k, [{"id": "a", "operation": "scs.solve", "inputs": LP},
+                    {"id": "b", "operation": "xgboost.train_predict", "inputs": XG},
                     *fuzz(1)])
     assert r.status_code == 200
     assert [t["status"] for t in r.json()["results"]] == ["error", "error", "ok"]
@@ -489,7 +494,7 @@ def test_migrating_a_pre_migration_database_keeps_data(database_url):
             conn.execute("INSERT INTO usage_requests (id, customer_id, key_id, task_count, ok_count, error_count, "
                          "duration_ms) VALUES (%s, 'legacy-cust', %s, 1, 1, 0, 1.0)", (uuid.uuid4(), kid))
         with psycopg.connect(f"{base}/{name}") as conn:
-            assert migrate(conn) == [1, 2, 3, 4, 5]
+            assert migrate(conn) == [1, 2, 3, 4, 5, 6]
         with psycopg.connect(f"{base}/{name}") as conn:
             assert conn.execute("SELECT balance FROM credit_accounts WHERE customer_id = 'legacy-cust'").fetchone() == (0,)
             assert conn.execute("SELECT count(*), sum(credits_charged) FROM usage_requests").fetchone() == (1, 0)
@@ -508,3 +513,39 @@ def test_migrations_are_recorded_and_idempotent(database_url):
         assert migrate(conn) == []
         versions = [r[0] for r in conn.execute("SELECT version FROM schema_migrations ORDER BY version")]
     assert versions == [v for v, _, _ in MIGRATIONS]
+
+
+# -- plain-English requests ------------------------------------------------------------------------
+def test_clarifications_and_invalid_inputs_are_free_routed_work_costs_one(database_url):
+    c = new_customer()
+    k = new_key(c)["secret"]
+    pay(c, 3)
+    r = execute(k, [{"id": "q", "request": "Compare these two names"}])              # no data: a question
+    assert r.status_code == 200 and r.json()["results"][0]["status"] == "needs_clarification"
+    r = execute(k, [{"id": "bad", "operation": "text.rank_matches", "inputs": {"query": "x"}}])  # schema-invalid
+    assert r.json()["results"][0]["error_type"] == "invalid_input"
+    assert balance(c) == 3                                                             # both free
+    r = execute(k, [{"id": "run", "request": "Find the closest names in this list",
+                     "data": {"name": "SECRET-NAME-1", "list": ["SECRET-NAME-2", "Jane"]}},
+                    {"id": "q2", "request": "Do something with this", "data": ["a", "b"]}])
+    results = {t["id"]: t for t in r.json()["results"]}
+    assert results["run"]["operation"] == "text.rank_matches" and results["run"]["status"] == "ok"
+    assert results["q2"]["status"] == "needs_clarification"
+    assert balance(c) == 2                                                             # only the routed run
+    usage = client.get("/v1/account/usage", headers=site(c)).json()
+    assert usage["totals"]["credits_charged"] == 1
+    assert {o["operation"] for o in usage["by_operation"]} >= {"text.rank_matches", "router"}
+    with psycopg.connect(database_url) as conn:                                        # no request text or data stored
+        dump = " ".join(str(row) for t in ("usage_requests", "usage_operations")
+                        for row in conn.execute(f"SELECT * FROM {t}").fetchall())
+    assert "SECRET-NAME" not in dump and "closest" not in dump
+    assert_ledger_consistent(database_url)
+
+
+def test_clarification_alone_needs_no_credits(database_url):
+    c = new_customer()
+    k = new_key(c)["secret"]                                                           # balance 0
+    r = execute(k, [{"id": "q", "request": "Find the closest names in this list", "data": ["a", "b"]}])
+    assert r.status_code == 200 and r.json()["results"][0]["status"] == "needs_clarification"
+    r = execute(k, [{"id": "run", "request": "Compare these two names", "data": ["a", "b"]}])
+    assert r.status_code == 402 and r.json()["required"] == 1                          # running needs a credit

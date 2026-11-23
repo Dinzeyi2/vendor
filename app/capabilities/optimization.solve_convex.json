@@ -1,0 +1,255 @@
+{
+  "name": "optimization.solve_convex",
+  "aliases": [
+    "scs.solve"
+  ],
+  "summary": "Solve a linear, quadratic or conic optimization problem: minimize 1/2 x'Px + c'x subject to Ax + s = b, s in K.",
+  "intents": [
+    "solve this linear program",
+    "solve an optimization problem",
+    "minimize the objective subject to constraints",
+    "maximize subject to linear constraints",
+    "quadratic programming",
+    "convex optimization solve",
+    "find the optimal solution of this LP",
+    "conic program solver"
+  ],
+  "clarify": "What are the objective c, the constraints A and b, and the cone? Send data like {\"c\": [-1, -1], \"A\": [[1, 2]], \"b\": [4], \"cone\": {\"l\": 1}}.",
+  "runtime": {
+    "kind": "python",
+    "worker": "scs",
+    "module": "app.ops.scs_ops",
+    "internal": "scs.solve"
+  },
+  "timeouts": {
+    "default": 30,
+    "max": 300
+  },
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "c": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "number"
+        },
+        "description": "Linear objective",
+        "x-aliases": [
+          "objective",
+          "costs"
+        ]
+      },
+      "A": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "number"
+          }
+        },
+        "description": "Constraint matrix, rows ordered by cone",
+        "maxItems": 50000,
+        "x-aliases": [
+          "constraints",
+          "matrix"
+        ]
+      },
+      "b": {
+        "type": "array",
+        "items": {
+          "type": "number"
+        },
+        "description": "Constraint right-hand side",
+        "x-aliases": [
+          "rhs",
+          "bounds"
+        ]
+      },
+      "cone": {
+        "type": "object",
+        "minProperties": 1,
+        "description": "Rows per cone type, e.g. {\"l\": 4}",
+        "properties": {
+          "z": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "l": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "ep": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "ed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "q": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "s": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      },
+      "P": {
+        "type": [
+          "array",
+          "null"
+        ],
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        },
+        "description": "Symmetric quadratic objective"
+      },
+      "eps_abs": {
+        "type": "number",
+        "minimum": 1e-12,
+        "maximum": 1,
+        "description": "Absolute accuracy",
+        "default": 1e-06
+      },
+      "eps_rel": {
+        "type": "number",
+        "minimum": 1e-12,
+        "maximum": 1,
+        "description": "Relative accuracy",
+        "default": 1e-06
+      },
+      "max_iters": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10000000,
+        "description": "Iteration limit",
+        "default": 100000
+      }
+    },
+    "required": [
+      "c",
+      "A",
+      "b",
+      "cone"
+    ]
+  },
+  "example": {
+    "request": "Solve this linear program",
+    "data": {
+      "c": [
+        -1,
+        -1
+      ],
+      "A": [
+        [
+          1,
+          2
+        ],
+        [
+          3,
+          1
+        ],
+        [
+          -1,
+          0
+        ],
+        [
+          0,
+          -1
+        ]
+      ],
+      "b": [
+        4,
+        6,
+        0,
+        0
+      ],
+      "cone": {
+        "l": 4
+      }
+    },
+    "inputs": {
+      "c": [
+        -1,
+        -1
+      ],
+      "A": [
+        [
+          1,
+          2
+        ],
+        [
+          3,
+          1
+        ],
+        [
+          -1,
+          0
+        ],
+        [
+          0,
+          -1
+        ]
+      ],
+      "b": [
+        4,
+        6,
+        0,
+        0
+      ],
+      "cone": {
+        "l": 4
+      }
+    },
+    "output": {
+      "status": "solved",
+      "status_val": 1,
+      "x": [
+        1.6,
+        1.2
+      ],
+      "y": [
+        0.4,
+        0.2,
+        0.0,
+        0.0
+      ],
+      "s": [
+        0.0,
+        0.0,
+        1.6,
+        1.2
+      ],
+      "objective": -2.8,
+      "dual_objective": -2.8,
+      "iterations": 50,
+      "solve_time_ms": 0.0985
+    }
+  },
+  "built_on": {
+    "project": "SCS",
+    "license": "MIT",
+    "copyright": "Copyright (c) 2012 Brendan O'Donoghue",
+    "source": "https://github.com/cvxgrp/scs",
+    "license_file": "licenses/SCS-MIT.txt",
+    "dependency": {
+      "manager": "pip",
+      "name": "scs",
+      "version": "3.3.2"
+    }
+  }
+}

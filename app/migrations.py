@@ -221,12 +221,20 @@ ALTER TABLE credit_grants ADD COLUMN purchased_at_source TEXT
     CHECK (purchased_at_source IN ('verified', 'received'));
 """
 
+V6_USAGE_CLARIFICATIONS = """
+-- Plain-English requests can be answered with a clarifying question (never charged).
+ALTER TABLE usage_operations DROP CONSTRAINT IF EXISTS usage_operations_status_check;
+ALTER TABLE usage_operations ADD CONSTRAINT usage_operations_status_check
+    CHECK (status IN ('ok', 'error', 'needs_clarification'));
+"""
+
 MIGRATIONS: List[Tuple[int, str, str]] = [
     (1, "accounts_keys_usage", V1_ACCOUNTS_KEYS_USAGE),
     (2, "prepaid_credits", V2_PREPAID_CREDITS),
     (3, "grants_replace_stripe", V3_GRANTS_REPLACE_STRIPE),
     (4, "credit_lots_and_expiration", V4_CREDIT_LOTS_AND_EXPIRATION),
     (5, "grant_purchase_time_source", V5_GRANT_PURCHASE_TIME_SOURCE),
+    (6, "usage_clarifications", V6_USAGE_CLARIFICATIONS),
 ]
 
 

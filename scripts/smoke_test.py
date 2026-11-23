@@ -65,6 +65,9 @@ CASES = {
     "text.similarity": (
         {"a": "Drift Protein", "b": "Drift Proteins"},
         lambda o: abs(o["score"] - 96.296) < 0.01, "score ~ 96.30"),
+    "text.rank_matches": (
+        {"query": "Jon Smith", "choices": ["Jane Doe", "John Smith", "Jonathan Smythe"]},
+        lambda o: o["matches"][0]["choice"] == "John Smith", "best match for 'Jon Smith' is 'John Smith'"),
     "vectors.nearest_neighbors": (
         {"vectors": [[0, 0], [1, 0], [0, 1], [5, 5]], "queries": [[0.9, 0.1]], "k": 2, "space": "l2"},
         lambda o: o["labels"][0] == [1, 0], "nearest to (0.9,0.1) are ids [1, 0]"),
@@ -129,6 +132,7 @@ OLD_NAMES = {
 
 def summarize(op, out):
     if op == "text.similarity": return f"score={out['score']:.4f}"
+    if op == "text.rank_matches": return f"matches={[(m['choice'], m['score']) for m in out['matches']]}"
     if op == "vectors.nearest_neighbors": return f"labels={out['labels']} distances={[[round(d, 3) for d in r] for r in out['distances']]}"
     if op == "tabular.train_and_predict": return f"prediction(2.5)={out['predictions'][0]:.4f}"
     if op == "optimization.solve_convex": return f"status={out['status']} x={[round(v, 5) for v in out['x']]} obj={out['objective']:.5f}"
@@ -162,6 +166,22 @@ def main() -> None:
         failures += not ok
         print(f"[{'PASS' if ok else 'FAIL'}] {r['id']:30s} {r['status']:5s} {r['duration_ms']:9.1f} ms")
     print(f"total request time {secs:.2f}s")
+
+    print("\n== plain-English requests: Cognex picks the operation")
+    routed = [
+        ({"id": "compare", "request": "Compare these two names", "data": ["Drift Protein", "Drift Proteins"]},
+         "text.similarity", "ok"),
+        ({"id": "closest", "request": "Find the closest names in this list",
+          "data": {"name": "Jon Smith", "list": ["Jane Doe", "John Smith", "Jonathan Smythe"]}}, "text.rank_matches", "ok"),
+        ({"id": "ask", "request": "Compare these two names"}, "text.similarity", "needs_clarification"),
+    ]
+    results, secs = post([t for t, _, _ in routed])
+    for r, (_, op, status) in zip(results, routed):
+        ok = r["status"] == status and r.get("operation") == op
+        if ok and status == "ok":
+            ok = bool(CASES[op][1](r["output"]))
+        failures += not ok
+        print(f"[{'PASS' if ok else 'FAIL'}] {r['id']:10s} -> {r.get('operation')} {r['status']} {r.get('question') or ''}")
 
     print("\n== compatibility: the original names still work and are echoed back")
     results, secs = post([{"id": old, "operation": old, "inputs": CASES[new][0]} for old, new in OLD_NAMES.items()])
