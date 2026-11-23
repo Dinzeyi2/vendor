@@ -1,9 +1,12 @@
-"""A customer's own imported operations: loaded per caller, executed in the sandbox.
+"""Imported operations: a customer's own (private) and Cognex's published ones, run in the sandbox.
 
 Private by construction: capabilities are looked up by the caller's customer_id only, never added
 to the global registry or catalog, so another account can neither list nor call them (an
 unknown name is simply unknown_operation). Only `ready` imports are callable; the one exception
 is Cognex's own scoped verification key, which may call its import while it is being verified.
+
+Published operations are imports the operator added and published under a Cognex name
+(`published()`): every API key can list and call them, billed like any other operation.
 """
 from __future__ import annotations
 
@@ -28,8 +31,10 @@ _build_locks: Dict[str, threading.Lock] = {}
 
 
 def invalidate() -> None:
+    global _published
     with _cache_lock:
         _cache.clear()
+        _published = (0.0, {})
 
 
 def capabilities_for(customer_id: str, scope: Optional[str] = None) -> Dict[str, Tuple[Capability, Any]]:
@@ -64,6 +69,38 @@ def capabilities_for(customer_id: str, scope: Optional[str] = None) -> Dict[str,
         out[op] = (cap, OpSpec(full_name, cap.default_timeout, cap.max_timeout, internal=cap.internal, runner=runner))
     with _cache_lock:
         _cache[key] = (now + TTL_S, out)
+    return out
+
+
+_published: Tuple[float, Dict[str, Tuple[Capability, Any]]] = (0.0, {})
+
+
+def published() -> Dict[str, Tuple[Capability, Any]]:
+    """{public name: (capability, OpSpec)} for every live published import (all callers)."""
+    global _published
+    now = time.monotonic()
+    with _cache_lock:
+        if _published[0] > now:
+            return _published[1]
+    from app.registry import OpSpec
+    with db.pool().connection() as conn:
+        rows = conn.execute("SELECT id, published_name, published_summary, manifest, spec, pins, repo_url, "
+                            "repo_full_name, commit_sha FROM github_imports WHERE published_at IS NOT NULL "
+                            "AND status = 'ready' AND manifest IS NOT NULL").fetchall()
+    out: Dict[str, Tuple[Capability, Any]] = {}
+    for iid, name, summary, manifest, spec, pins, url, full_name, commit in rows:
+        m = {**manifest, "name": name, "summary": summary or manifest["summary"]}
+        if summary:
+            m["intents"] = list(dict.fromkeys([summary.rstrip("."), *manifest.get("intents", [])]))[:12]
+            m["example"] = {**manifest["example"], "request": summary.rstrip(".")}
+        try:
+            cap = manifests.parse(m)
+        except manifests.ManifestError:
+            continue
+        runner = partial(execute, str(iid), spec, pins or [], url, commit)
+        out[name] = (cap, OpSpec(full_name, cap.default_timeout, cap.max_timeout, internal=cap.internal, runner=runner))
+    with _cache_lock:
+        _published = (now + TTL_S, out)
     return out
 
 

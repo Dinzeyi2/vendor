@@ -31,6 +31,13 @@ is Ready, private to that customer.
   to run third-party code on a developer machine.
 - Imports are never added to the global registry or catalog. Keep it that way: they're looked up
   per caller in `app/imports/private.py`.
+- **Published imports:** the operator adds a repo with `POST /v1/admin/imports` (operator key,
+  owner `cognex-operator`) plus `"publish": {"name": "category.action", "summary": ...}`, or later
+  with `POST /v1/admin/imports/{id}/publish`. Once Ready it is callable by every API key through
+  `/v1/execute`, listed in `/v1/operations`, and attributed on `/v1/open-source`
+  (`private.published()`). Only operator-owned imports can be published; customer imports stay
+  private. Published names follow the public naming rule (no library/GitHub names).
+  `.../unpublish` removes it.
 
 ## Layout
 

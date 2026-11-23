@@ -291,3 +291,79 @@ def test_ready_import_rebuilds_after_its_files_are_wiped(tmp_path):
     res = execute(key, [{"id": "1", "operation": "geodist.geodist",
                          "inputs": {"point1": [0, 0], "point2": [0, 1]}}]).json()["results"][0]
     assert res["status"] == "ok" and abs(res["output"]["result"] - 111.195) < 0.01
+
+
+# -- operator imports published for every customer -------------------------------------------------------
+def admin(method, path, **kw):
+    return client.request(method, path, headers={"X-API-Key": OPERATOR_KEY}, **kw)
+
+
+def test_published_operation_is_callable_by_every_customer_with_their_own_key():
+    name = "geo.distance_" + uuid.uuid4().hex[:6]
+    r = admin("POST", "/v1/admin/imports", json={"url": "https://github.com/cognex-fixtures/geodist", "publish": {
+        "name": name, "summary": "Great-circle distance between two latitude/longitude points"}})
+    assert r.status_code in (200, 202), r.text
+    assert r.json()["published"]["operation"] == name and not r.json()["published"]["live"]   # live once Ready
+    import_id = r.json()["id"]
+    run_worker()
+    imp = admin("GET", f"/v1/admin/imports/{import_id}").json()
+    assert imp["status"] == "ready" and imp["published"]["operation"] == name and imp["published"]["live"], imp
+
+    a, b = new_customer(), new_customer()
+    key_a, key_b = key_for(a, credits=5), key_for(b, credits=5)
+    lyon, paris = [45.7597, 4.8422], [48.8567, 2.3508]
+    ra = execute(key_a, [{"id": "a", "operation": name, "inputs": {"point1": lyon, "point2": paris}}]).json()["results"][0]
+    rb = execute(key_b, [{"id": "b", "operation": name, "inputs": {"point1": lyon, "point2": paris, "unit": "mi"},
+                          "timeout_s": 20}]).json()["results"][0]          # its own inputs and options
+    assert ra["status"] == "ok" and ra["operation"] == name and abs(ra["output"]["result"] - 392.2172595594006) < 1e-6
+    assert rb["status"] == "ok" and rb["operation"] == name and abs(rb["output"]["result"] - 243.7125060953981) < 1e-3
+    assert balance(a) == 4 and balance(b) == 4                 # each pays 1 credit from its own balance
+    rp = execute(key_a, [{"id": "p", "request": "great-circle distance between two latitude/longitude points",
+                          "data": {"point1": [0, 0], "point2": [0, 1]}}]).json()["results"][0]
+    assert rp["status"] == "ok" and rp["operation"] == name    # plain English routes to it too
+    bad = execute(key_b, [{"id": "x", "operation": name, "inputs": {"point1": "nope"}}]).json()["results"][0]
+    assert bad["error_type"] == "invalid_input" and balance(b) == 4   # validated before running: free
+
+    for key in (key_a, key_b, None):                           # in every catalog, including the public one
+        ops = client.get("/v1/operations", headers={"X-API-Key": key} if key else {}).json()["operations"]
+        entry = next(o for o in ops if o["operation"] == name)
+        assert not entry.get("private") and entry["summary"].startswith("Great-circle")
+    assert any(p["operation"] == name and p["license"] == "MIT" for p in
+               client.get("/v1/open-source").json()["projects"])  # attribution kept
+    assert name in {o["operation"] for o in client.get("/v1/account/usage", headers=site(a)).json()["by_operation"]}
+    assert admin("POST", "/v1/execute", json={"tasks": [{"id": "o", "operation": name, "inputs": {
+        "point1": lyon, "point2": paris}}]}).json()["results"][0]["status"] == "ok"
+
+    assert admin("POST", f"/v1/admin/imports/{import_id}/unpublish").json().get("published") is None
+    gone = execute(key_a, [{"id": "g", "operation": name, "inputs": {"point1": lyon, "point2": paris}}]).json()
+    assert gone["results"][0]["error_type"] == "unknown_operation" and balance(a) == 3
+
+
+def test_publish_rules():
+    c = new_customer()
+    key_for(c, credits=0)
+    customer_import = submit(c, "typed").json()["id"]
+    r = admin("POST", "/v1/admin/imports", json={"url": "https://github.com/cognex-fixtures/typed"})
+    own = r.json()["id"]
+    run_worker()
+    # a customer's import stays private: the operator can't see or publish it
+    assert admin("GET", f"/v1/admin/imports/{customer_import}").status_code == 404
+    assert admin("POST", f"/v1/admin/imports/{customer_import}/publish",
+                 json={"name": "text.decorate_x"}).json()["error"] == "not_publishable"
+    assert admin("POST", f"/v1/admin/imports/{own}/publish", json={"name": "Bad Name"}).json()["error"] == "invalid_name"
+    assert admin("POST", f"/v1/admin/imports/{own}/publish",
+                 json={"name": "text.similarity"}).json()["error"] == "name_taken"     # a built-in
+    name = "text.decorate_" + uuid.uuid4().hex[:6]
+    r = admin("POST", f"/v1/admin/imports/{own}/publish", json={"name": name})   # already ready: live at once
+    assert r.status_code == 200 and r.json()["published"]["live"], r.text
+    other = admin("POST", "/v1/admin/imports", json={"url": "https://github.com/cognex-fixtures/ambiguous",
+                                                     "entry_point": "median_of"}).json()["id"]
+    assert admin("POST", f"/v1/admin/imports/{other}/publish", json={"name": name}).json()["error"] == "name_taken"
+    run_worker()
+    key = key_for(new_customer(), credits=1)
+    res = execute(key, [{"id": "1", "operation": name, "inputs": {"text": "ab", "case": "upper"}}]).json()["results"][0]
+    assert res["status"] == "ok" and res["output"] == {"result": {"text": "AB-AB", "length": 5}}
+    # admin endpoints need the operator key; customers' keys and the website secret don't work
+    for headers in ({"X-API-Key": key}, site(c), {}):
+        assert client.post("/v1/admin/imports", headers=headers,
+                           json={"url": "https://github.com/cognex-fixtures/geodist"}).status_code in (401, 403)

@@ -64,7 +64,7 @@ def _slug(s: str, limit: int = 40) -> str:
 # -- public view of an import -----------------------------------------------------------------------
 COLUMNS = ("id, customer_id, repo_url, repo_full_name, commit_sha, entry_point, status, stage, failure_code, "
            "failure_reason, failure_details, operation, manifest, spec, pins, license_spdx, example_response, "
-           "created_at, updated_at, ready_at, attempts")
+           "created_at, updated_at, ready_at, attempts, published_name, published_summary, published_at")
 
 
 def _row(r) -> Dict[str, Any]:
@@ -98,6 +98,10 @@ def public_view(row: Dict[str, Any], base_url: str) -> Dict[str, Any]:
             "plain_english_example": {"tasks": [{"id": "1", "request": m["example"]["request"],
                                                  "data": m["example"]["data"]}]},
             "credits_per_call": catalog.CREDITS_PER_OPERATION})
+    if row.get("published_name"):
+        out["published"] = {"operation": row["published_name"], "live": bool(row["published_at"] and
+                                                                                 row["status"] == "ready"),
+                            "published_at": row["published_at"]}
     return out
 
 
@@ -175,6 +179,69 @@ def get_for(customer_id: str, import_id: uuid.UUID) -> Optional[Dict[str, Any]]:
     return _row(r) if r else None
 
 
+# -- publishing (operator only) -----------------------------------------------------------------------
+OPERATOR_OWNER = "cognex-operator"   # account that owns imports the operator adds from GitHub links
+PUBLIC_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,39}\.[a-z][a-z0-9_]{1,59}$")
+
+
+def get_any(import_id: uuid.UUID) -> Optional[Dict[str, Any]]:
+    with db.pool().connection() as conn:
+        r = conn.execute(f"SELECT {COLUMNS} FROM github_imports WHERE id = %s", (import_id,)).fetchone()
+    return _row(r) if r else None
+
+
+def list_all(limit: int = 200) -> List[Dict[str, Any]]:
+    """Operator view: Cognex's own imports and everything published."""
+    with db.pool().connection() as conn:
+        rows = conn.execute(f"SELECT {COLUMNS} FROM github_imports WHERE customer_id = %s OR published_name IS NOT "
+                            f"NULL ORDER BY created_at DESC LIMIT %s", (OPERATOR_OWNER, limit)).fetchall()
+    return [_row(r) for r in rows]
+
+
+def publish(import_id: uuid.UUID, name: str, summary: Optional[str] = None) -> Dict[str, Any]:
+    """Publish an operator import under a Cognex name, for every customer. Live as soon as it is
+    ready (immediately if it already is). Customer imports stay private and can't be published."""
+    if not PUBLIC_NAME_RE.match(name):
+        raise SubmitError(400, "invalid_name", "name must look like 'category.action' (lowercase letters, digits, _).")
+    if summary is not None and not 10 <= len(summary.strip()) <= 300:
+        raise SubmitError(400, "invalid_summary", "summary must be 10-300 characters.")
+    if name in catalog.BY_NAME or name in catalog.ALIASES:
+        raise SubmitError(409, "name_taken", f"'{name}' is already a built-in Cognex operation.")
+    with db.pool().connection() as conn:
+        row = conn.execute(f"SELECT {COLUMNS} FROM github_imports WHERE id = %s FOR UPDATE", (import_id,)).fetchone()
+        if row is None:
+            raise SubmitError(404, "not_found", "import not found")
+        row = _row(row)
+        if row["customer_id"] != OPERATOR_OWNER:
+            raise SubmitError(409, "not_publishable", "Only imports added by Cognex (POST /v1/admin/imports) can be "
+                                                      "published; customer imports stay private.")
+        if row["status"] == "failed":
+            raise SubmitError(409, "import_failed", f"The import failed ({row['failure_code']}); retry it first.")
+        clash = conn.execute(
+            "SELECT id FROM github_imports WHERE id <> %s AND (lower(published_name) = lower(%s) OR "
+            "(operation = %s AND status IN ('running', 'ready')))", (import_id, name, name)).fetchone()
+        if clash:
+            raise SubmitError(409, "name_taken", f"'{name}' is already used by another operation.")
+        live = row["status"] == "ready"
+        fresh = conn.execute(
+            f"UPDATE github_imports SET published_name = %s, published_summary = %s, published_at = "
+            f"CASE WHEN %s THEN now() END, updated_at = now() WHERE id = %s RETURNING {COLUMNS}",
+            (name, summary.strip() if summary else None, live, import_id)).fetchone()
+    from app.imports import private
+    private.invalidate()
+    return _row(fresh)
+
+
+def unpublish(import_id: uuid.UUID) -> Optional[Dict[str, Any]]:
+    with db.pool().connection() as conn:
+        r = conn.execute(f"UPDATE github_imports SET published_name = NULL, published_summary = NULL, "
+                         f"published_at = NULL, updated_at = now() WHERE id = %s AND customer_id = %s "
+                         f"RETURNING {COLUMNS}", (import_id, OPERATOR_OWNER)).fetchone()
+    from app.imports import private
+    private.invalidate()
+    return _row(r) if r else None
+
+
 # -- worker -------------------------------------------------------------------------------------------
 def _update(import_id, **fields) -> None:
     sets = ", ".join(f"{k} = %s" for k in fields) + ", updated_at = now()"
@@ -240,6 +307,8 @@ def _operation_name(customer_id: str, import_id, repo: str, function: str, commi
         taken |= {r[0] for r in conn.execute(
             "SELECT operation FROM github_imports WHERE customer_id = %s AND id <> %s AND operation IS NOT NULL "
             "AND status IN ('running', 'ready')", (customer_id, import_id)).fetchall()}
+        taken |= {r[0] for r in conn.execute(  # published operations are visible to every customer
+            "SELECT published_name FROM github_imports WHERE published_name IS NOT NULL").fetchall()}
     name = base if base not in taken else f"{base}_{commit[:7]}"
     return name if name not in taken else f"{base}_{uuid.uuid4().hex[:6]}"
 
@@ -332,8 +401,9 @@ def process(row: Dict[str, Any]) -> None:
             raise ImportFailure("verification_failed",
                                 f"The test call through POST /v1/execute didn't succeed: {str(why)[:400]}")
         _update(import_id, status="ready", stage="ready", example_response={"results": [result]})
-        with db.pool().connection() as conn:
-            conn.execute("UPDATE github_imports SET ready_at = now() WHERE id = %s", (import_id,))
+        with db.pool().connection() as conn:  # a name reserved at submit goes live now
+            conn.execute("UPDATE github_imports SET ready_at = now(), published_at = CASE WHEN published_name "
+                         "IS NOT NULL THEN now() END WHERE id = %s", (import_id,))
         from app.imports import private
         private.invalidate()
         log.info("import %s ready as %s", import_id, name)

@@ -194,8 +194,19 @@ def list_operations(caller: Optional[Caller] = Depends(optional_caller)) -> Dict
                 "worker_unexpected_exits": WORKERS[spec.worker].exits if spec.worker else 0,
                 "worker_notes": list(WORKERS[spec.worker].notes) if spec.worker else []})
         ops.append(item)
+    try:  # operations Cognex published from GitHub imports: listed for everyone, like the built-ins
+        published = private_imports.published() if db.configured() else {}
+    except db.DatabaseUnavailable:
+        published = {}
+    for name, (cap, spec) in published.items():
+        ops.append({"operation": name, "summary": cap.summary, "credits": catalog.CREDITS_PER_OPERATION,
+                    "default_timeout_s": spec.default_timeout, "max_timeout_s": spec.max_timeout,
+                    "input_schema": cap.input_schema,
+                    "example": {"request": cap.example["request"], "data": cap.example["data"]}})
     if caller is not None and caller.owner is not None and caller.owner.kind == "customer":
         for name, (cap, spec) in private_imports.capabilities_for(caller.owner.customer_id).items():
+            if name in published:
+                continue
             ops.append({"operation": name, "summary": cap.summary, "credits": catalog.CREDITS_PER_OPERATION,
                         "default_timeout_s": spec.default_timeout, "max_timeout_s": spec.max_timeout,
                         "input_schema": cap.input_schema, "private": True,
@@ -207,9 +218,16 @@ def list_operations(caller: Optional[Caller] = Depends(optional_caller)) -> Dict
 @app.get("/v1/open-source")
 def open_source() -> Dict[str, Any]:
     """Public: the open-source projects behind the operations, with their licenses (attribution page)."""
-    return {"projects": [
-        {"operation": e.name, "project": e.built_on.project, "license": e.built_on.license,
-         "copyright": e.built_on.copyright, "source": e.built_on.source} for e in catalog.ENTRIES]}
+    projects = [{"operation": e.name, "project": e.built_on.project, "license": e.built_on.license,
+                 "copyright": e.built_on.copyright, "source": e.built_on.source} for e in catalog.ENTRIES]
+    try:
+        published = private_imports.published() if db.configured() else {}
+    except db.DatabaseUnavailable:
+        published = {}
+    projects += [{"operation": name, "project": cap.built_on.project, "license": cap.built_on.license,
+                  "copyright": cap.built_on.copyright, "source": cap.built_on.source}
+                 for name, (cap, _) in published.items()]
+    return {"projects": projects}
 
 
 _STDERR_MARKER = "; last stderr:"
@@ -235,7 +253,7 @@ def _plan(task: Task, private: Optional[Dict[str, Any]] = None) -> _Plan:
     private = private or {}
     if task.operation is not None:
         found = lookup(task.operation)
-        if found is None and task.operation in private:  # the caller's own imported operation
+        if found is None and task.operation in private:  # a published import, or the caller's own
             cap, spec = private[task.operation]
             problem = router.validation_error(cap, task.inputs)
             if problem:
@@ -329,15 +347,19 @@ async def execute(request: ExecuteRequest, caller: Caller = Depends(require_api_
     loop = asyncio.get_running_loop()
     reservation: Optional[billing.Reservation] = None
     owner = caller.owner
-    private: Dict[str, Any] = {}
-    if owner is not None and (owner.kind == "import_check" or any(
-            t.request is not None or lookup(t.operation) is None for t in request.tasks)):
+    private: Dict[str, Any] = {}   # imported operations this caller may use (published + its own)
+    checking = owner is not None and owner.kind == "import_check"
+    if checking or any(t.request is not None or lookup(t.operation) is None for t in request.tasks):
+        def load_imports() -> Dict[str, Any]:
+            if checking:
+                return private_imports.capabilities_for(owner.customer_id, owner.scope)
+            own = private_imports.capabilities_for(owner.customer_id) if owner is not None else {}
+            return {**own, **(private_imports.published() if db.configured() else {})}
         try:
-            private = await loop.run_in_executor(_executor, private_imports.capabilities_for, owner.customer_id,
-                                                 owner.scope if owner.kind == "import_check" else None)
+            private = await loop.run_in_executor(_executor, load_imports)
         except db.DatabaseUnavailable:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="key store unavailable") from None
-    if owner is not None and owner.kind == "import_check":  # Cognex's verification key: its one import only
+    if checking:  # Cognex's verification key: its one import only
         if any(t.operation not in private for t in request.tasks):
             raise HTTPException(status.HTTP_403_FORBIDDEN, detail="this key may only call the import it verifies")
     plans = await loop.run_in_executor(_executor, lambda: [_plan(t, private) for t in request.tasks])

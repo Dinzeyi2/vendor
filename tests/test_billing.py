@@ -494,7 +494,7 @@ def test_migrating_a_pre_migration_database_keeps_data(database_url):
             conn.execute("INSERT INTO usage_requests (id, customer_id, key_id, task_count, ok_count, error_count, "
                          "duration_ms) VALUES (%s, 'legacy-cust', %s, 1, 1, 0, 1.0)", (uuid.uuid4(), kid))
         with psycopg.connect(f"{base}/{name}") as conn:
-            assert migrate(conn) == [1, 2, 3, 4, 5, 6, 7]
+            assert migrate(conn) == [1, 2, 3, 4, 5, 6, 7, 8]
         with psycopg.connect(f"{base}/{name}") as conn:
             assert conn.execute("SELECT balance FROM credit_accounts WHERE customer_id = 'legacy-cust'").fetchone() == (0,)
             assert conn.execute("SELECT count(*), sum(credits_charged) FROM usage_requests").fetchone() == (1, 0)

@@ -6,6 +6,15 @@
 - GET  /v1/account/imports/{id}     one import: status, stage, failure reason, or (ready) the
                                      operation name, schema and a copyable POST /v1/execute example
 - GET  /v1/admin/imports/sandbox-selftest   operator: prove what the sandbox blocks on this server
+
+Operator (X-API-Key = the operator key): add a GitHub repo and publish it for every customer.
+- POST /v1/admin/imports                 {"url", optional "entry_point", "retry", "publish": {"name", "summary"}}
+                                          the same pipeline; with "publish" it goes live for all customers
+                                          as soon as it is Ready
+- GET  /v1/admin/imports                 Cognex's imports and everything published
+- GET  /v1/admin/imports/{id}
+- POST /v1/admin/imports/{id}/publish    {"name": "category.action", optional "summary"}
+- POST /v1/admin/imports/{id}/unpublish
 """
 from __future__ import annotations
 
@@ -83,3 +92,64 @@ def sandbox_selftest():
     res = sandbox.run("selftest", {"app_dir": "/app", "alloc_bytes": 3 * 1024 ** 3}, paths=[], timeout=60,
                       scratch_root=jobs.imports_dir() / "tmp")
     return {"sandbox_mode": sandbox.mode(), "result": res}
+
+
+class PublishRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=3, max_length=100, description="Cognex operation name, e.g. geo.distance")
+    summary: Optional[str] = Field(default=None, max_length=300, description="Public one-line description")
+
+
+class AdminImportRequest(ImportRequest):
+    publish: Optional[PublishRequest] = Field(default=None, description="Publish for every customer once Ready")
+
+
+def _publish_or_error(import_id, body: PublishRequest, request: Request):
+    try:
+        row = _call(jobs.publish, import_id, body.name, body.summary)
+    except jobs.SubmitError as exc:
+        return JSONResponse(status_code=exc.status, content={"error": exc.code, "message": exc.reason})
+    return jobs.public_view(row, _base_url(request))
+
+
+@router.post("/v1/admin/imports", dependencies=[Depends(require_operator)], include_in_schema=False, status_code=202)
+def admin_submit(body: AdminImportRequest, request: Request):
+    try:
+        row, created = _call(jobs.submit, jobs.OPERATOR_OWNER, body.url, body.entry_point, body.retry)
+    except jobs.SubmitError as exc:
+        return JSONResponse(status_code=exc.status, content={"error": exc.code, "message": exc.reason})
+    view = jobs.public_view(row, _base_url(request))
+    if body.publish is not None:
+        view = _publish_or_error(row["id"], body.publish, request)
+        if isinstance(view, JSONResponse):
+            return view
+    return JSONResponse(status_code=202 if created else 200, content=jsonable_encoder(view))
+
+
+@router.get("/v1/admin/imports", dependencies=[Depends(require_operator)], include_in_schema=False)
+def admin_list(request: Request):
+    base = _base_url(request)
+    return {"imports": [{**jobs.public_view(r, base), "owner": r["customer_id"]} for r in _call(jobs.list_all)]}
+
+
+@router.get("/v1/admin/imports/{import_id}", dependencies=[Depends(require_operator)], include_in_schema=False)
+def admin_get(import_id: uuid.UUID, request: Request):
+    row = _call(jobs.get_any, import_id)
+    if row is None or (row["customer_id"] != jobs.OPERATOR_OWNER and not row["published_name"]):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "import not found")  # customers' imports stay private
+    return jobs.public_view(row, _base_url(request))
+
+
+@router.post("/v1/admin/imports/{import_id}/publish", dependencies=[Depends(require_operator)],
+             include_in_schema=False)
+def admin_publish(import_id: uuid.UUID, body: PublishRequest, request: Request):
+    return _publish_or_error(import_id, body, request)
+
+
+@router.post("/v1/admin/imports/{import_id}/unpublish", dependencies=[Depends(require_operator)],
+             include_in_schema=False)
+def admin_unpublish(import_id: uuid.UUID, request: Request):
+    row = _call(jobs.unpublish, import_id)
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "import not found")
+    return jobs.public_view(row, _base_url(request))

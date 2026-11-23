@@ -268,6 +268,17 @@ ALTER TABLE api_keys ADD COLUMN kind TEXT NOT NULL DEFAULT 'customer' CHECK (kin
 ALTER TABLE api_keys ADD COLUMN scope TEXT;
 """
 
+V8_PUBLISHED_IMPORTS = """
+-- Imports added by the Cognex operator can be published under a Cognex name: callable by every
+-- customer through POST /v1/execute. published_name reserves the name (also while the import is
+-- still running); the operation is live only when published_at is set and the import is ready.
+ALTER TABLE github_imports ADD COLUMN published_name TEXT;
+ALTER TABLE github_imports ADD COLUMN published_summary TEXT;
+ALTER TABLE github_imports ADD COLUMN published_at TIMESTAMPTZ;
+CREATE UNIQUE INDEX github_imports_published_name ON github_imports (lower(published_name))
+    WHERE published_name IS NOT NULL;
+"""
+
 MIGRATIONS: List[Tuple[int, str, str]] = [
     (1, "accounts_keys_usage", V1_ACCOUNTS_KEYS_USAGE),
     (2, "prepaid_credits", V2_PREPAID_CREDITS),
@@ -276,6 +287,7 @@ MIGRATIONS: List[Tuple[int, str, str]] = [
     (5, "grant_purchase_time_source", V5_GRANT_PURCHASE_TIME_SOURCE),
     (6, "usage_clarifications", V6_USAGE_CLARIFICATIONS),
     (7, "github_imports", V7_GITHUB_IMPORTS),
+    (8, "published_imports", V8_PUBLISHED_IMPORTS),
 ]
 
 
