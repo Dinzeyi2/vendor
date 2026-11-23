@@ -84,12 +84,14 @@ def published() -> Dict[str, Tuple[Capability, Any]]:
             return _published[1]
     from app.registry import OpSpec
     with db.pool().connection() as conn:
-        rows = conn.execute("SELECT id, published_name, published_summary, manifest, spec, pins, repo_url, "
+        rows = conn.execute("SELECT id, published_name, published_summary, published_when_to_use, manifest, spec, pins, repo_url, "
                             "repo_full_name, commit_sha FROM github_imports WHERE published_at IS NOT NULL "
                             "AND status = 'ready' AND manifest IS NOT NULL").fetchall()
     out: Dict[str, Tuple[Capability, Any]] = {}
-    for iid, name, summary, manifest, spec, pins, url, full_name, commit in rows:
+    for iid, name, summary, use, manifest, spec, pins, url, full_name, commit in rows:
         m = {**manifest, "name": name, "summary": summary or manifest["summary"]}
+        if use:
+            m["when_to_use"] = use
         if summary:
             m["intents"] = list(dict.fromkeys([summary.rstrip("."), *manifest.get("intents", [])]))[:12]
             m["example"] = {**manifest["example"], "request": summary.rstrip(".")}

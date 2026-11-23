@@ -1,6 +1,7 @@
 {
   "name": "text.rank_matches",
   "summary": "Rank a list of strings by how closely each one matches a query string, best match first.",
+  "when_to_use": "Use when you have one query string and a list of candidates and want the closest candidates first, for search-as-you-type, deduplication or matching a typed name to a known list. To score just two strings, use text.similarity.",
   "intents": [
     "find the closest names in this list",
     "find the closest match in a list",
@@ -132,6 +133,21 @@
           "choice": "John Smith",
           "score": 94.7368,
           "index": 0
+        },
+        {
+          "choice": "J. Smith",
+          "score": 83.125,
+          "index": 3
+        },
+        {
+          "choice": "Jonathan Smythe",
+          "score": 66.6667,
+          "index": 2
+        },
+        {
+          "choice": "Jane Doe",
+          "score": 35.2941,
+          "index": 1
         }
       ]
     }

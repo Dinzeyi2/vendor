@@ -279,6 +279,11 @@ CREATE UNIQUE INDEX github_imports_published_name ON github_imports (lower(publi
     WHERE published_name IS NOT NULL;
 """
 
+V9_PUBLISHED_WHEN_TO_USE = """
+-- Discovery: when an app or AI builder should pick a published operation (GET /v1/operations).
+ALTER TABLE github_imports ADD COLUMN published_when_to_use TEXT;
+"""
+
 MIGRATIONS: List[Tuple[int, str, str]] = [
     (1, "accounts_keys_usage", V1_ACCOUNTS_KEYS_USAGE),
     (2, "prepaid_credits", V2_PREPAID_CREDITS),
@@ -288,6 +293,7 @@ MIGRATIONS: List[Tuple[int, str, str]] = [
     (6, "usage_clarifications", V6_USAGE_CLARIFICATIONS),
     (7, "github_imports", V7_GITHUB_IMPORTS),
     (8, "published_imports", V8_PUBLISHED_IMPORTS),
+    (9, "published_when_to_use", V9_PUBLISHED_WHEN_TO_USE),
 ]
 
 

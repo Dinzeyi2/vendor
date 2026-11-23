@@ -4,6 +4,7 @@
     "xgboost.train_predict"
   ],
   "summary": "Train a gradient-boosted tree model on your rows, then predict values or classes for new rows.",
+  "when_to_use": "Use when you have labelled rows of numbers and want to predict a value (regression) or a class (classification) for new rows in a single call. Not for cause and effect: use causal.estimate_effect.",
   "intents": [
     "train a model and predict new rows",
     "predict values for new rows from training data",
@@ -292,12 +293,12 @@
       ],
       "probabilities": [
         [
-          0.7987,
-          0.2013
+          0.7986807823181152,
+          0.20131921768188477
         ],
         [
-          0.2013,
-          0.7987
+          0.20131921768188477,
+          0.7986807823181152
         ]
       ],
       "feature_importances": [

@@ -64,7 +64,8 @@ def _slug(s: str, limit: int = 40) -> str:
 # -- public view of an import -----------------------------------------------------------------------
 COLUMNS = ("id, customer_id, repo_url, repo_full_name, commit_sha, entry_point, status, stage, failure_code, "
            "failure_reason, failure_details, operation, manifest, spec, pins, license_spdx, example_response, "
-           "created_at, updated_at, ready_at, attempts, published_name, published_summary, published_at")
+           "created_at, updated_at, ready_at, attempts, published_name, published_summary, published_at, "
+           "published_when_to_use")
 
 
 def _row(r) -> Dict[str, Any]:
@@ -101,7 +102,8 @@ def public_view(row: Dict[str, Any], base_url: str) -> Dict[str, Any]:
     if row.get("published_name"):
         out["published"] = {"operation": row["published_name"], "live": bool(row["published_at"] and
                                                                                  row["status"] == "ready"),
-                            "published_at": row["published_at"]}
+                            "published_at": row["published_at"], "summary": row["published_summary"],
+                            "when_to_use": row["published_when_to_use"]}
     return out
 
 
@@ -198,13 +200,16 @@ def list_all(limit: int = 200) -> List[Dict[str, Any]]:
     return [_row(r) for r in rows]
 
 
-def publish(import_id: uuid.UUID, name: str, summary: Optional[str] = None) -> Dict[str, Any]:
+def publish(import_id: uuid.UUID, name: str, summary: Optional[str] = None,
+            when_to_use: Optional[str] = None) -> Dict[str, Any]:
     """Publish an operator import under a Cognex name, for every customer. Live as soon as it is
     ready (immediately if it already is). Customer imports stay private and can't be published."""
     if not PUBLIC_NAME_RE.match(name):
         raise SubmitError(400, "invalid_name", "name must look like 'category.action' (lowercase letters, digits, _).")
     if summary is not None and not 10 <= len(summary.strip()) <= 300:
         raise SubmitError(400, "invalid_summary", "summary must be 10-300 characters.")
+    if when_to_use is not None and not 10 <= len(when_to_use.strip()) <= 500:
+        raise SubmitError(400, "invalid_when_to_use", "when_to_use must be 10-500 characters.")
     if name in catalog.BY_NAME or name in catalog.ALIASES:
         raise SubmitError(409, "name_taken", f"'{name}' is already a built-in Cognex operation.")
     with db.pool().connection() as conn:
@@ -224,9 +229,11 @@ def publish(import_id: uuid.UUID, name: str, summary: Optional[str] = None) -> D
             raise SubmitError(409, "name_taken", f"'{name}' is already used by another operation.")
         live = row["status"] == "ready"
         fresh = conn.execute(
-            f"UPDATE github_imports SET published_name = %s, published_summary = %s, published_at = "
-            f"CASE WHEN %s THEN now() END, updated_at = now() WHERE id = %s RETURNING {COLUMNS}",
-            (name, summary.strip() if summary else None, live, import_id)).fetchone()
+            f"UPDATE github_imports SET published_name = %s, published_summary = %s, published_when_to_use = %s, "
+            f"published_at = CASE WHEN published_at IS NOT NULL AND published_name = %s THEN published_at "
+            f"WHEN %s THEN now() END, updated_at = now() WHERE id = %s RETURNING {COLUMNS}",
+            (name, summary.strip() if summary else None, when_to_use.strip() if when_to_use else None, name, live,
+             import_id)).fetchone()
     from app.imports import private
     private.invalidate()
     return _row(fresh)
@@ -235,7 +242,7 @@ def publish(import_id: uuid.UUID, name: str, summary: Optional[str] = None) -> D
 def unpublish(import_id: uuid.UUID) -> Optional[Dict[str, Any]]:
     with db.pool().connection() as conn:
         r = conn.execute(f"UPDATE github_imports SET published_name = NULL, published_summary = NULL, "
-                         f"published_at = NULL, updated_at = now() WHERE id = %s AND customer_id = %s "
+                         f"published_when_to_use = NULL, published_at = NULL, updated_at = now() WHERE id = %s AND customer_id = %s "
                          f"RETURNING {COLUMNS}", (import_id, OPERATOR_OWNER)).fetchone()
     from app.imports import private
     private.invalidate()

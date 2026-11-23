@@ -4,6 +4,7 @@
     "dowhy.estimate_effect"
   ],
   "summary": "Estimate the average causal effect of a treatment on an outcome from observational data, adjusting for confounders.",
+  "when_to_use": "Use when you have observational rows and want to know how much one variable (a treatment, such as a discount or a feature launch) changes an outcome, controlling for other factors. Not for predictions: use tabular.train_and_predict.",
   "intents": [
     "estimate the causal effect of the treatment on the outcome",
     "what is the effect of the discount on spend",
@@ -277,7 +278,7 @@
       ]
     },
     "output": {
-      "effect": 2.9898,
+      "effect": 2.9897628433639944,
       "method": "backdoor.linear_regression",
       "treatment": "discount",
       "outcome": "spend",

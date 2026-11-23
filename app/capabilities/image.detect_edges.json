@@ -4,6 +4,7 @@
     "kornia.canny"
   ],
   "summary": "Detect edges in an image (Canny) and return the edge mask as a PNG plus edge statistics.",
+  "when_to_use": "Use when you need the outlines or edges of shapes in an image, for example to measure edge density, find object boundaries or preprocess an image for further analysis. Not for reading text: use image.extract_text.",
   "intents": [
     "detect the edges in this image",
     "edge detection on a photo",
@@ -101,8 +102,8 @@
       "width": 48,
       "height": 48,
       "edge_pixels": 92,
-      "edge_fraction": 0.0399,
-      "edges_png_base64": "iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAAAAABy..."
+      "edge_fraction": 0.03993055555555555,
+      "edges_png_base64": "iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAAAAAByaaZbAAAARElEQVR4nGNgGAWjACtgROP/J6SCEU01ugE4BHEajynMxEAB+M9ACxuYRjUQAZiIUYQMRjUM0VCifZ5mIcaKUTAKaAEA8hwKJob8UjgAAAAASUVORK5CYII="
     }
   },
   "built_on": {

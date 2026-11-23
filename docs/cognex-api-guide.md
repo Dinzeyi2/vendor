@@ -284,6 +284,50 @@ Tips:
 
 The same list is available as JSON from `GET /v1/operations`. If an operation hasn't been used for a while, its first request can take longer while its engine starts.
 
+## Discover operations (for apps and AI app builders)
+
+`GET /v1/operations` (no key needed) is the machine-readable list of everything you can run, including operations added after this guide was written. Point your app or AI builder at it. For one operation, use `GET /v1/operations/{name}`. Run any operation with the same `POST /v1/execute` and your own API key.
+
+Each entry has:
+
+| Field | What it tells you |
+|---|---|
+| `purpose` | What the operation does |
+| `when_to_use` | When to pick it (and which operation to use instead when it's the wrong fit) |
+| `required_inputs` | Inputs you must send: name, type, description, allowed values |
+| `optional_settings` | Inputs you may send, with defaults and allowed values, plus `timeout_s` |
+| `request_example` | A working `POST /v1/execute` request (URL, headers, body) |
+| `response_example` | The response that request returns |
+| `plain_english_example` | The same task as a plain-English `request` + `data` |
+| `input_schema` | The full JSON Schema for `inputs` |
+
+The response also has `how_to_call` (endpoint, headers, body shape, credit rules, result format) and `catalog_version`. `catalog_version` (also the `ETag` header) changes whenever an operation is added, removed or changed: send it back as `If-None-Match` to get `304 Not Modified` when nothing changed.
+
+```json
+{
+  "operation": "text.similarity",
+  "purpose": "Score how similar two strings are, 0-100 (normalized Indel similarity).",
+  "when_to_use": "Use when you need a 0-100 score for how alike two strings are, for example to check whether two names, product titles or addresses refer to the same thing despite typos. To find the best matches in a list, use text.rank_matches.",
+  "credits": 1,
+  "required_inputs": [
+    {"name": "a", "type": "string", "description": "First string"},
+    {"name": "b", "type": "string", "description": "Second string"}
+  ],
+  "optional_settings": [
+    {"name": "timeout_s", "type": "number", "where": "task (next to operation and inputs)", "default": 5.0, "maximum": 10.0,
+     "description": "Seconds before the run is stopped; capped at the maximum."}
+  ],
+  "request_example": {
+    "method": "POST",
+    "url": "https://vendor-production-41cd558f.up.railway.app/v1/execute",
+    "headers": {"Content-Type": "application/json", "X-API-Key": "<your Cognex API key>"},
+    "body": {"tasks": [{"id": "1", "operation": "text.similarity", "inputs": {"a": "Drift Protein", "b": "Drift Proteins"}}]}
+  },
+  "response_example": {"results": [{"id": "1", "operation": "text.similarity", "status": "ok",
+                                    "output": {"score": 96.2962962962963, "scorer": "ratio"}}]}
+}
+```
+
 ---
 
 ### `text.similarity`

@@ -4,6 +4,7 @@
     "rapier.simulate"
   ],
   "summary": "Simulate 3-D rigid bodies (balls, boxes, capsules) under gravity with collisions, and return their final state.",
+  "when_to_use": "Use when you need to know where 3-D objects (balls, boxes, capsules) end up after falling, colliding and settling under gravity, for games, packing or what-if physics checks.",
   "intents": [
     "simulate a ball falling onto the ground",
     "run a physics simulation",
@@ -221,7 +222,7 @@
     },
     "output": {
       "steps": 240,
-      "timestep": 0.0167,
+      "timestep": 0.016666666666666666,
       "simulated_time": 4,
       "bodies": [
         {
@@ -248,7 +249,7 @@
           "id": "ball",
           "position": [
             0,
-            0.5987,
+            0.5987234711647034,
             0
           ],
           "rotation": [

@@ -4,6 +4,7 @@
     "scs.solve"
   ],
   "summary": "Solve a linear, quadratic or conic optimization problem: minimize 1/2 x'Px + c'x subject to Ax + s = b, s in K.",
+  "when_to_use": "Use when you need the best values for decision variables under linear constraints: linear programs (budgets, blending, allocation), quadratic programs (portfolio risk) or second-order cone problems. You provide the problem in standard conic form.",
   "intents": [
     "solve this linear program",
     "solve an optimization problem",
@@ -219,25 +220,25 @@
       "status": "solved",
       "status_val": 1,
       "x": [
-        1.6,
-        1.2
+        1.599999999583677,
+        1.1999999983058907
       ],
       "y": [
-        0.4,
-        0.2,
+        0.4000000000609986,
+        0.20000000001407045,
         0.0,
         0.0
       ],
       "s": [
         0.0,
         0.0,
-        1.6,
-        1.2
+        1.5999999996136252,
+        1.1999999985980219
       ],
-      "objective": -2.8,
-      "dual_objective": -2.8,
+      "objective": -2.799999997889567,
+      "dual_objective": -2.8000000003284176,
       "iterations": 50,
-      "solve_time_ms": 0.0985
+      "solve_time_ms": 0.0909
     }
   },
   "built_on": {

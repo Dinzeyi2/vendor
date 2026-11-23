@@ -4,6 +4,7 @@
     "timefold.school_timetabling"
   ],
   "summary": "Assign lessons to timeslots and rooms with no room, teacher or student-group double-booking.",
+  "when_to_use": "Use when you need to place lessons (or any meetings with a teacher and a group) into timeslots and rooms so that no room, teacher or group is booked twice.",
   "intents": [
     "make a school timetable",
     "schedule these lessons into rooms and timeslots",

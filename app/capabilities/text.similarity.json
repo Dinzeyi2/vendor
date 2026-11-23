@@ -4,6 +4,7 @@
     "rapidfuzz.compare"
   ],
   "summary": "Score how similar two strings are, 0-100 (normalized Indel similarity).",
+  "when_to_use": "Use when you need a 0-100 score for how alike two strings are, for example to check whether two names, product titles or addresses refer to the same thing despite typos. To find the best matches in a list, use text.rank_matches.",
   "intents": [
     "compare these two names",
     "compare two strings",
@@ -130,7 +131,7 @@
       "b": "Drift Proteins"
     },
     "output": {
-      "score": 96.2963,
+      "score": 96.2962962962963,
       "scorer": "ratio"
     }
   },

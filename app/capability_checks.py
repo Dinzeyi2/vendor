@@ -49,13 +49,19 @@ def library_words(caps: List[Capability]) -> List[str]:
 
 
 def public_text(cap: Capability) -> str:
-    return " ".join([cap.name, cap.summary, cap.clarify or "", cap.example["request"], *cap.intents,
-                     json.dumps(cap.input_schema)])
+    return " ".join([cap.name, cap.summary, cap.when_to_use or "", cap.clarify or "", cap.example["request"],
+                     *cap.intents, json.dumps(cap.input_schema),
+                     json.dumps({k: v for k, v in (cap.example.get("output") or {}).items()
+                                 if k not in cap.engine_fields})])
 
 
 def check(cap: Capability, caps: List[Capability]) -> List[str]:
     """Problems with one capability, judged among all registered capabilities (empty = OK)."""
     problems = []
+    if not cap.when_to_use:
+        problems.append("when_to_use is missing (shown to apps and AI builders in GET /v1/operations)")
+    if not cap.example.get("output"):
+        problems.append("example.output is missing (the response example in GET /v1/operations)")
     bad = router.validation_error(cap, cap.example["inputs"])
     if bad:
         problems.append(f"example.inputs fail the input schema: {bad}")

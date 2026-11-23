@@ -11,11 +11,11 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Literal, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Security, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, Security, status
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from app import accounts, billing, catalog, db, router
+from app import accounts, billing, catalog, db, discovery, router
 from app.imports import jobs as import_jobs, private as private_imports
 from app.account_api import router as account_router
 from app.billing_api import error_response, router as billing_router
@@ -173,19 +173,19 @@ def optional_caller(provided: Optional[str] = Security(_api_key_header)) -> Opti
     return require_api_key(provided) if provided else None
 
 
-@app.get("/v1/operations")
-def list_operations(caller: Optional[Caller] = Depends(optional_caller)) -> Dict[str, Any]:
-    """Public catalog of Cognex operations. Compatibility aliases are accepted but not listed."""
+def _published_safe() -> Dict[str, Any]:
+    try:
+        return private_imports.published() if db.configured() else {}
+    except db.DatabaseUnavailable:
+        return {}
+
+
+def _discoverable(caller: Optional[Caller], base: str) -> List[Dict[str, Any]]:
+    """Every operation this caller can run: built-in, published, then the caller's own imports."""
     operator = caller is not None and caller.kind == "operator"
     ops = []
     for name, spec in OPERATIONS.items():
-        meta = catalog.BY_NAME.get(name)
-        item: Dict[str, Any] = {"operation": name, "summary": meta.summary if meta else "",
-                                "credits": catalog.CREDITS_PER_OPERATION,
-                                "default_timeout_s": spec.default_timeout, "max_timeout_s": spec.max_timeout}
-        if meta:  # what it accepts, and a plain-English request that routes to it
-            item["input_schema"] = meta.input_schema
-            item["example"] = {"request": meta.example["request"], "data": meta.example["data"]}
+        item = discovery.describe(CAPABILITIES[name], base)
         if operator:  # aliases and worker internals are for the operator only
             item.update({
                 "aliases": [a for a, n in catalog.ALIASES.items() if n == name],
@@ -194,25 +194,45 @@ def list_operations(caller: Optional[Caller] = Depends(optional_caller)) -> Dict
                 "worker_unexpected_exits": WORKERS[spec.worker].exits if spec.worker else 0,
                 "worker_notes": list(WORKERS[spec.worker].notes) if spec.worker else []})
         ops.append(item)
-    try:  # operations Cognex published from GitHub imports: listed for everyone, like the built-ins
-        published = private_imports.published() if db.configured() else {}
-    except db.DatabaseUnavailable:
-        published = {}
-    for name, (cap, spec) in published.items():
-        ops.append({"operation": name, "summary": cap.summary, "credits": catalog.CREDITS_PER_OPERATION,
-                    "default_timeout_s": spec.default_timeout, "max_timeout_s": spec.max_timeout,
-                    "input_schema": cap.input_schema,
-                    "example": {"request": cap.example["request"], "data": cap.example["data"]}})
+    published = _published_safe()
+    ops += [discovery.describe(cap, base) for cap, _ in published.values()]
     if caller is not None and caller.owner is not None and caller.owner.kind == "customer":
-        for name, (cap, spec) in private_imports.capabilities_for(caller.owner.customer_id).items():
-            if name in published:
-                continue
-            ops.append({"operation": name, "summary": cap.summary, "credits": catalog.CREDITS_PER_OPERATION,
-                        "default_timeout_s": spec.default_timeout, "max_timeout_s": spec.max_timeout,
-                        "input_schema": cap.input_schema, "private": True,
-                        "example": {"request": cap.example["request"], "data": cap.example["data"]}})
-    return {"credits_per_operation": catalog.CREDITS_PER_OPERATION, "operations": ops,
+        ops += [discovery.describe(cap, base, private=True) for name, (cap, _)
+                in private_imports.capabilities_for(caller.owner.customer_id).items() if name not in published]
+    return ops
+
+
+@app.get("/v1/operations")
+def list_operations(request: Request, response: Response,
+                    caller: Optional[Caller] = Depends(optional_caller)):
+    """Discovery for apps and AI app builders: every operation you can run, with its purpose, when to
+    use it, required inputs, optional settings, and a working POST /v1/execute request and response.
+
+    Built-in and published operations are listed for everyone; with a customer key, that customer's
+    own private imports are added. Newly published operations appear within seconds.
+    `catalog_version` (also the ETag) changes whenever the list changes; send If-None-Match to get
+    304 when nothing changed. Compatibility aliases are accepted by /v1/execute but not listed.
+    """
+    base = discovery.base_url(request)
+    ops = _discoverable(caller, base)
+    ver = discovery.version(ops)
+    headers = {"ETag": f'"{ver}"', "Cache-Control": "no-cache"}
+    if request.headers.get("if-none-match", "").strip('W/ "') == ver:
+        return Response(status_code=304, headers=headers)
+    response.headers.update(headers)
+    return {"catalog_version": ver, "count": len(ops), "credits_per_operation": catalog.CREDITS_PER_OPERATION,
+            "how_to_call": discovery.how_to_call(base, MAX_TASKS), "operations": ops,
             "open_source_acknowledgements": "/v1/open-source"}
+
+
+@app.get("/v1/operations/{name}")
+def get_operation(name: str, request: Request, caller: Optional[Caller] = Depends(optional_caller)):
+    """One operation's discovery entry (by its name or a compatibility alias)."""
+    base = discovery.base_url(request)
+    found = discovery.find(_discoverable(caller, base), name)
+    if found is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"unknown operation '{name}'; see GET /v1/operations")
+    return {**found, "how_to_call": discovery.how_to_call(base, MAX_TASKS)}
 
 
 @app.get("/v1/open-source")
@@ -220,10 +240,7 @@ def open_source() -> Dict[str, Any]:
     """Public: the open-source projects behind the operations, with their licenses (attribution page)."""
     projects = [{"operation": e.name, "project": e.built_on.project, "license": e.built_on.license,
                  "copyright": e.built_on.copyright, "source": e.built_on.source} for e in catalog.ENTRIES]
-    try:
-        published = private_imports.published() if db.configured() else {}
-    except db.DatabaseUnavailable:
-        published = {}
+    published = _published_safe()
     projects += [{"operation": name, "project": cap.built_on.project, "license": cap.built_on.license,
                   "copyright": cap.built_on.copyright, "source": cap.built_on.source}
                  for name, (cap, _) in published.items()]

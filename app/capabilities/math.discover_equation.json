@@ -4,6 +4,7 @@
     "pysr.symbolic_regression"
   ],
   "summary": "Discover a readable mathematical formula that fits your data (symbolic regression).",
+  "when_to_use": "Use when you have numeric inputs and outputs and want a human-readable formula that explains them, rather than a black-box model. Best for small, clean datasets (tens to hundreds of rows).",
   "intents": [
     "find the equation that fits this data",
     "discover a formula for y in terms of x",
@@ -242,12 +243,12 @@
       "pareto_front": [
         {
           "equation": "4.12499950000000",
-          "loss": 3.8156,
+          "loss": 3.815625,
           "complexity": 1
         },
         {
           "equation": "x0 - 1*(-3.874997)",
-          "loss": 3.8156,
+          "loss": 3.8156247,
           "complexity": 3
         },
         {

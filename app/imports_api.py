@@ -13,12 +13,11 @@ Operator (X-API-Key = the operator key): add a GitHub repo and publish it for ev
                                           as soon as it is Ready
 - GET  /v1/admin/imports                 Cognex's imports and everything published
 - GET  /v1/admin/imports/{id}
-- POST /v1/admin/imports/{id}/publish    {"name": "category.action", optional "summary"}
+- POST /v1/admin/imports/{id}/publish    {"name": "category.action", optional "summary", "when_to_use"}
 - POST /v1/admin/imports/{id}/unpublish
 """
 from __future__ import annotations
 
-import os
 import uuid
 from typing import Optional
 
@@ -27,7 +26,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from app import db
+from app import db, discovery
 from app.account_api import signed_in_customer
 from app.billing_api import require_operator
 from app.imports import jobs, sandbox
@@ -35,13 +34,7 @@ from app.imports import jobs, sandbox
 router = APIRouter()
 
 
-def _base_url(request: Request) -> str:
-    explicit = os.environ.get("COGNEX_PUBLIC_URL")
-    if explicit:
-        return explicit.rstrip("/")
-    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or "localhost"
-    proto = request.headers.get("x-forwarded-proto") or ("http" if host.startswith(("127.", "localhost")) else "https")
-    return f"{proto}://{host}"
+_base_url = discovery.base_url
 
 
 def _call(fn, *args):
@@ -98,6 +91,8 @@ class PublishRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=3, max_length=100, description="Cognex operation name, e.g. geo.distance")
     summary: Optional[str] = Field(default=None, max_length=300, description="Public one-line description")
+    when_to_use: Optional[str] = Field(default=None, max_length=500,
+                                       description="When an app or AI builder should pick this operation")
 
 
 class AdminImportRequest(ImportRequest):
@@ -106,7 +101,7 @@ class AdminImportRequest(ImportRequest):
 
 def _publish_or_error(import_id, body: PublishRequest, request: Request):
     try:
-        row = _call(jobs.publish, import_id, body.name, body.summary)
+        row = _call(jobs.publish, import_id, body.name, body.summary, body.when_to_use)
     except jobs.SubmitError as exc:
         return JSONResponse(status_code=exc.status, content={"error": exc.code, "message": exc.reason})
     return jobs.public_view(row, _base_url(request))

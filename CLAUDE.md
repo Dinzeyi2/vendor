@@ -37,7 +37,16 @@ is Ready, private to that customer.
   `/v1/execute`, listed in `/v1/operations`, and attributed on `/v1/open-source`
   (`private.published()`). Only operator-owned imports can be published; customer imports stay
   private. Published names follow the public naming rule (no library/GitHub names).
-  `.../unpublish` removes it.
+  `.../unpublish` removes it. Pass `when_to_use` (and a `summary`) when publishing: both appear in
+  discovery.
+
+## Discovery (`GET /v1/operations`)
+
+Built by `app/discovery.py` from the manifests (built-in, published, and the caller's private
+imports). Each entry has: purpose, when_to_use, required_inputs, optional_settings, and a working
+request_example/response_example. It also has catalog_version, which is the ETag. Every built-in
+manifest needs `when_to_use` and the real `example.output`; `verify_capabilities.py` checks both.
+`scripts/discovery_test.py [BASE]` runs every published example exactly as written.
 
 ## Layout
 

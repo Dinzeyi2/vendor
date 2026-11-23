@@ -4,6 +4,7 @@
     "paddleocr.ocr"
   ],
   "summary": "Read printed text in an image (OCR) and return each line with its confidence and bounding box.",
+  "when_to_use": "Use when an image (a screenshot, scanned page, receipt or photo of a sign) contains printed text you want as plain text, with each line's position and confidence.",
   "intents": [
     "read the text in this image",
     "extract text from an image",
@@ -91,7 +92,7 @@
       "lines": [
         {
           "text": "Hello Cognex",
-          "confidence": 0.9999,
+          "confidence": 0.999910295009613,
           "box": [
             5,
             7,

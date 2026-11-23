@@ -4,6 +4,7 @@
     "hnswlib.knn_query"
   ],
   "summary": "Find the k nearest vectors to each query vector (approximate search; l2, inner product or cosine).",
+  "when_to_use": "Use when you have embeddings or other numeric vectors and want the k most similar ones to each query vector, for semantic search, recommendations or deduplication.",
   "intents": [
     "find the nearest vectors",
     "find the closest embeddings to this query vector",
@@ -181,8 +182,8 @@
       ],
       "distances": [
         [
-          0.02,
-          0.82
+          0.020000005140900612,
+          0.8199999332427979
         ]
       ],
       "space": "l2",

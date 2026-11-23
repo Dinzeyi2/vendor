@@ -5,6 +5,7 @@ of GitHub; they run in the sandbox's insecure-dev mode because the strict lockdo
 root (it is exercised on the server by GET /v1/admin/imports/sandbox-selftest).
 """
 import hashlib
+import json
 import shutil
 import uuid
 from pathlib import Path
@@ -300,8 +301,10 @@ def admin(method, path, **kw):
 
 def test_published_operation_is_callable_by_every_customer_with_their_own_key():
     name = "geo.distance_" + uuid.uuid4().hex[:6]
+    before = client.get("/v1/operations").json()["catalog_version"]
     r = admin("POST", "/v1/admin/imports", json={"url": "https://github.com/cognex-fixtures/geodist", "publish": {
-        "name": name, "summary": "Great-circle distance between two latitude/longitude points"}})
+        "name": name, "summary": "Great-circle distance between two latitude/longitude points",
+        "when_to_use": "Use when you need the distance between two places given as latitude/longitude pairs."}})
     assert r.status_code in (200, 202), r.text
     assert r.json()["published"]["operation"] == name and not r.json()["published"]["live"]   # live once Ready
     import_id = r.json()["id"]
@@ -328,6 +331,17 @@ def test_published_operation_is_callable_by_every_customer_with_their_own_key():
         ops = client.get("/v1/operations", headers={"X-API-Key": key} if key else {}).json()["operations"]
         entry = next(o for o in ops if o["operation"] == name)
         assert not entry.get("private") and entry["summary"].startswith("Great-circle")
+    # discovery for AI app builders: current as soon as it is published, with a working example
+    disc = client.get("/v1/operations").json()
+    assert disc["catalog_version"] != before
+    d = client.get(f"/v1/operations/{name}").json()
+    assert d["purpose"].startswith("Great-circle") and d["when_to_use"].startswith("Use when you need the distance")
+    assert [f["name"] for f in d["required_inputs"]] == ["point1", "point2"]
+    unit = next(f for f in d["optional_settings"] if f["name"] == "unit")
+    assert unit["default"] == "km" and "mi" in unit["allowed"]
+    assert "geodist" not in json.dumps(d).replace(d["request_example"]["url"], "")   # no GitHub/library name
+    ran = execute(key_b, d["request_example"]["body"]["tasks"]).json()["results"][0]
+    assert ran["status"] == "ok" and ran["output"] == d["response_example"]["results"][0]["output"]
     assert any(p["operation"] == name and p["license"] == "MIT" for p in
                client.get("/v1/open-source").json()["projects"])  # attribution kept
     assert name in {o["operation"] for o in client.get("/v1/account/usage", headers=site(a)).json()["by_operation"]}
@@ -337,6 +351,8 @@ def test_published_operation_is_callable_by_every_customer_with_their_own_key():
     assert admin("POST", f"/v1/admin/imports/{import_id}/unpublish").json().get("published") is None
     gone = execute(key_a, [{"id": "g", "operation": name, "inputs": {"point1": lyon, "point2": paris}}]).json()
     assert gone["results"][0]["error_type"] == "unknown_operation" and balance(a) == 3
+    assert name not in {o["operation"] for o in client.get("/v1/operations").json()["operations"]}
+    assert client.get(f"/v1/operations/{name}").status_code == 404
 
 
 def test_publish_rules():

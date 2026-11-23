@@ -124,7 +124,9 @@ def test_public_catalog_lists_only_cognex_names_with_cost_and_license():
     assert not any(old in text for old in OLD_NAMES)      # aliases are never advertised publicly
     for o in ops:
         assert o["credits"] == 1 and o["summary"]
-        assert set(o) == {"operation", "summary", "credits", "default_timeout_s", "max_timeout_s", "input_schema", "example"}
+        assert set(o) == {"operation", "summary", "credits", "default_timeout_s", "max_timeout_s", "input_schema", "example",
+                          "purpose", "when_to_use", "required_inputs", "optional_settings", "request_example",
+                          "response_example", "plain_english_example"}  # original fields kept, discovery added
     projects = ["rapidfuzz", "hnswlib", "xgboost", "dowhy", "kornia", "paddle", "pysr", "timefold",
                 "rapier", "github", "scs"]
     assert not [p for p in projects if p in text.lower()]  # no library names in the catalog
