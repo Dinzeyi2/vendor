@@ -8,6 +8,8 @@ Reads the key from the environment or .env, and never prints it.
 """
 from __future__ import annotations
 
+import base64
+import io
 import json
 import math
 import os
@@ -43,13 +45,26 @@ def http(method: str, path: str, body=None, headers=None, timeout=300):
         return exc.code, {"error": exc.read().decode()[:300]}
 
 
-def close(a, b) -> bool:
+def same_png(a: str, b: str) -> bool:
+    """Images compare by their pixels: the same image can compress to different PNG bytes per platform."""
+    try:
+        from PIL import Image
+        img = lambda s: Image.open(io.BytesIO(base64.b64decode(s)))  # noqa: E731
+        x, y = img(a), img(b)
+        return x.size == y.size and x.convert("RGBA").tobytes() == y.convert("RGBA").tobytes()
+    except Exception:  # noqa: BLE001 - not decodable: fall back to exact text
+        return a == b
+
+
+def close(a, b, key: str = "") -> bool:
+    if key.endswith("_png_base64") and isinstance(a, str) and isinstance(b, str):
+        return same_png(a, b)
     if isinstance(a, bool) or isinstance(b, bool):
         return a == b
     if isinstance(a, (int, float)) and isinstance(b, (int, float)):
         return math.isclose(a, b, rel_tol=1e-2, abs_tol=1e-6)
     if isinstance(a, dict) and isinstance(b, dict):  # elapsed-time fields (e.g. solve_time_ms) vary per run
-        return a.keys() == b.keys() and all(close(a[k], b[k]) for k in a if not k.endswith(("_ms", "_seconds")))
+        return a.keys() == b.keys() and all(close(a[k], b[k], k) for k in a if not k.endswith(("_ms", "_seconds")))
     if isinstance(a, list) and isinstance(b, list):
         return len(a) == len(b) and all(close(x, y) for x, y in zip(a, b))
     return a == b
