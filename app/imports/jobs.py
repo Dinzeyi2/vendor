@@ -249,6 +249,46 @@ def unpublish(import_id: uuid.UUID) -> Optional[Dict[str, Any]]:
     return _row(r) if r else None
 
 
+# -- attribution refresh (operator) --------------------------------------------------------------------
+def refresh_attribution(import_id: uuid.UUID) -> Optional[Dict[str, Any]]:
+    """Re-detect an import's license and copyright from its pinned commit and update the record.
+
+    Informational only: it changes the attribution shown for the import, never whether it can
+    be imported, tested, published or called."""
+    row = get_any(import_id)
+    if row is None or not row.get("manifest"):
+        return None
+    work = imports_dir() / str(import_id)
+    src, tmp = work / "src", None
+    if not src.is_dir():  # e.g. after a redeploy without a volume: fetch the same commit again
+        tmp = Path(tempfile.mkdtemp(prefix="cognex-attr-"))
+        src = FETCH(github.parse_url(row["repo_url"]), row["commit_sha"], tmp / "src")
+    try:
+        files = licensing.license_files(src)
+        try:
+            info = packaging.analyze(src, row["repo_full_name"].split("/")[1])
+            package_dir = info.root / info.module
+        except ImportFailure:
+            package_dir = None
+        spdx, lic, holders = licensing.attribution(files, src, package_dir)
+        if lic is not None and work.is_dir():
+            shutil.copyfile(src / lic["file"], work / "LICENSE")
+    finally:
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
+    m = row["manifest"]
+    before = {"license": row["license_spdx"], "copyright": m["built_on"]["copyright"]}
+    copyright_text = "; ".join(holders)[:500] or f"Copyright the {row['repo_full_name']} authors"
+    m = {**m, "built_on": {**m["built_on"], "license": spdx, "copyright": copyright_text,
+                           "license_file": m["built_on"]["license_file"] if lic is not None else "none"}}
+    manifests.parse(m)
+    _update(import_id, license_spdx=spdx, license_text=lic["text"][:200_000] if lic else None, manifest=m)
+    from app.imports import private
+    private.invalidate()
+    return {"id": str(import_id), "repo": row["repo_full_name"], "commit": row["commit_sha"],
+            "before": before, "after": {"license": spdx, "copyright": copyright_text}}
+
+
 # -- worker -------------------------------------------------------------------------------------------
 def _update(import_id, **fields) -> None:
     sets = ", ".join(f"{k} = %s" for k in fields) + ", updated_at = now()"
@@ -374,11 +414,13 @@ def process(row: Dict[str, Any]) -> None:
         _update(import_id, stage="fetching")
         FETCH(ref, row["commit_sha"], src)
         _update(import_id, stage="reading_license")  # recorded for attribution; never accepts or rejects
-        spdx, lic = licensing.attribution(licensing.license_files(src))
+        files = licensing.license_files(src)
+        _update(import_id, stage="analyzing")
+        info = packaging.analyze(src, ref.repo)
+        spdx, lic, holders = licensing.attribution(files, src, info.root / info.module)
         if lic is not None:
             shutil.copyfile(src / lic["file"], work / "LICENSE")
-        _update(import_id, stage="analyzing", license_spdx=spdx, license_text=lic["text"][:200_000] if lic else None)
-        info = packaging.analyze(src, ref.repo)
+        _update(import_id, license_spdx=spdx, license_text=lic["text"][:200_000] if lic else None)
         _update(import_id, stage="installing")
         pins = installer.install(info.dependencies, site)
         _update(import_id, stage="discovering", pins=pins)
@@ -391,8 +433,7 @@ def process(row: Dict[str, Any]) -> None:
         _validate_discovery(res, info.module)
         _update(import_id, stage="registering")
         name = _operation_name(row["customer_id"], import_id, ref.repo, res["function"], row["commit_sha"])
-        manifest = _manifest(name, row, info, res, spdx, lic["copyright_lines"] if lic else [],
-                             has_license_file=lic is not None)
+        manifest = _manifest(name, row, info, res, spdx, holders, has_license_file=lic is not None)
         manifests.parse(manifest)  # same format checks as built-in operations
         spec = {"module": info.module, "function": res["function"], "params": res["params"],
                 "root": str(info.root.relative_to(src)).replace("\\", "/") if info.root != src else "",

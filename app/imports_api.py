@@ -15,6 +15,7 @@ Operator (X-API-Key = the operator key): add a GitHub repo and publish it for ev
 - GET  /v1/admin/imports/{id}
 - POST /v1/admin/imports/{id}/publish    {"name": "category.action", optional "summary", "when_to_use"}
 - POST /v1/admin/imports/{id}/unpublish
+- POST /v1/admin/imports/{id}/refresh-attribution   re-detect license + copyright from the pinned commit
 """
 from __future__ import annotations
 
@@ -139,6 +140,19 @@ def admin_get(import_id: uuid.UUID, request: Request):
              include_in_schema=False)
 def admin_publish(import_id: uuid.UUID, body: PublishRequest, request: Request):
     return _publish_or_error(import_id, body, request)
+
+
+@router.post("/v1/admin/imports/{import_id}/refresh-attribution", dependencies=[Depends(require_operator)],
+             include_in_schema=False)
+def admin_refresh_attribution(import_id: uuid.UUID):
+    """Re-detect license + copyright from the import's pinned commit (attribution only)."""
+    try:
+        out = _call(jobs.refresh_attribution, import_id)
+    except jobs.ImportFailure as exc:
+        return JSONResponse(status_code=502, content={"error": exc.code, "message": exc.reason})
+    if out is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "import not found")
+    return out
 
 
 @router.post("/v1/admin/imports/{import_id}/unpublish", dependencies=[Depends(require_operator)],

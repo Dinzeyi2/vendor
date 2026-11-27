@@ -260,7 +260,34 @@ def test_no_license_failure_codes_or_checks_remain():
     assert not {c for c in jobs.FAILURE_CODES if "licen" in c}
     from app.imports import licensing
     assert not hasattr(licensing, "verdict")
-    assert all(len(entry) == 2 for entry in licensing.LICENSES)   # SPDX id + phrase: no allow/deny flag
+    assert not any(isinstance(x, bool) for t in licensing.TITLES for x in t[:2])   # no allow/deny flag
+
+
+def test_import_records_the_projects_attribution_and_the_operator_can_refresh_it():
+    c = new_customer()
+    key_for(c, credits=0)
+    import_id = submit(c, "gplreadme").json()["id"]
+    run_worker()
+    imp = status_of(c, import_id)
+    assert imp["status"] == "ready", imp
+    want = {"spdx": "GPL-2.0-or-later", "copyright": "Copyright 2001, Ada Example <ada@example.org>, all rights "
+                                                      "reserved.; Copyright 2026, Tomaž Example <tomaz@example.org>"}
+    assert imp["license"] == want
+    # an import recorded by the old detector (wrong label + template copyright), files gone after a redeploy
+    row = jobs.get_any(uuid.UUID(import_id))
+    bad = {**row["manifest"], "built_on": {**row["manifest"]["built_on"], "license": "LGPL",
+                                           "copyright": "Copyright (C) <year>  <name of author>"}}
+    jobs._update(import_id, license_spdx="LGPL", manifest=bad)
+    shutil.rmtree(jobs.imports_dir() / import_id)
+    assert status_of(c, import_id)["license"]["spdx"] == "LGPL"
+    assert client.post(f"/v1/admin/imports/{import_id}/refresh-attribution",
+                       headers=site(c)).status_code in (401, 403)        # operator only
+    r = admin("POST", f"/v1/admin/imports/{import_id}/refresh-attribution")
+    assert r.status_code == 200, r.text
+    assert r.json()["before"] == {"license": "LGPL", "copyright": "Copyright (C) <year>  <name of author>"}
+    assert r.json()["after"] == {"license": want["spdx"], "copyright": want["copyright"]}
+    imp = status_of(c, import_id)
+    assert imp["license"] == want and imp["status"] == "ready"           # nothing else changed
 
 
 # -- failures: a specific reason, never callable ---------------------------------------------------------
