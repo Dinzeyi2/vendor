@@ -263,6 +263,8 @@ def choose(endpoints: List[Dict[str, Any]], entry: Optional[str]) -> Dict[str, A
                                 + ", ".join(_label(e) for e in endpoints[:15]), candidates=[_label(e) for e in endpoints[:15]])
         return hit
     useful = [e for e in endpoints if not BORING.match(e["path"])]
+    if not useful:  # only "/" (plus health/docs): the root page is the service's operation
+        useful = [e for e in endpoints if e["path"] == "/" and e["method"] == "GET"]
     if len(useful) == 1:
         return useful[0]
     from app.imports.plan import NeedsConfig

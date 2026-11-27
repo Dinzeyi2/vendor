@@ -285,7 +285,9 @@ class Recorder:
 def _code_blocks(readme: str) -> List[str]:
     blocks = re.findall(r"```(?:python|py|pycon|python3)?[^\n]*\n(.*?)```", readme, flags=re.S)
     blocks += re.findall(r"::\n\n((?:[ \t]+.*\n|\n)+)", readme)  # reStructuredText literal blocks
-    return [b for b in blocks if "(" in b][:30]
+    blocks += re.findall(r"(?m)^\.\. (?:code|code-block|sourcecode|doctest)::[^\n]*\n(?:[ \t]+:\w[\w-]*:.*\n)*\n"
+                         r"((?:[ \t]+.*\n|[ \t]*\n)+)", readme)  # reStructuredText code directives
+    return [b for b in blocks if "(" in b][:40]
 
 
 def _statements(block: str) -> List[Tuple[str, Optional[str]]]:
@@ -867,6 +869,13 @@ def command(payload: dict) -> dict:
     try:
         if mode == "stdout":
             result: Any = {"stdout": out.decode("utf-8", "replace"), "exit_code": proc.returncode}
+        elif mode == "stdout_auto":  # text when it is text, base64 when the program writes binary
+            try:
+                result = {"stdout": out.decode("utf-8"), "exit_code": proc.returncode}
+            except UnicodeDecodeError:
+                import base64
+                result = {"stdout_base64": base64.b64encode(out).decode(), "bytes": len(out),
+                          "exit_code": proc.returncode}
         elif mode == "stdout_json":
             result = {"result": json.loads(out.decode("utf-8"))}
         else:
@@ -887,6 +896,8 @@ def command(payload: dict) -> dict:
 def _shell_blocks(readme: str) -> List[str]:
     blocks = re.findall(r"```(?:sh|bash|shell|console|shell-session|zsh|text|terminal)?[^\n]*\n(.*?)```", readme, re.S)
     blocks += re.findall(r"::\n\n((?:[ \t]+.*\n|\n)+)", readme)
+    blocks += re.findall(r"(?m)^\.\. (?:code|code-block|sourcecode)::[^\n]*\n(?:[ \t]+:\w[\w-]*:.*\n)*\n"
+                         r"((?:[ \t]+.*\n|[ \t]*\n)+)", readme)
     return blocks[:60]
 
 
@@ -936,6 +947,27 @@ def _cli_examples(readme: str, bins: List[str]) -> List[dict]:
     return out[:20]
 
 
+FILTER_SAMPLE = "Hello from Cognex\n"
+
+
+def _probe_filters(bins: dict, payload: dict) -> Optional[dict]:
+    """No documented example: many command-line programs are filters (standard input in, standard
+    output out). Run each with sample text and no arguments; the first that answers becomes the
+    operation, with binary output (e.g. a compressor) returned as base64."""
+    repo = re.sub(r"[^a-z0-9]", "", (payload.get("repo_name") or "").lower())
+    order = sorted(bins, key=lambda b: (re.sub(r"[^a-z0-9]", "", b.lower()) != repo, len(b)))
+    for name in order[:4]:
+        spec = {"argv": [f"{{bin:{name}}}", "{args...}"], "stdin": "{stdin}", "bins": bins, "output": "stdout_auto",
+                "env": payload.get("env") or {}}
+        inputs = {"args": [], "stdin": FILTER_SAMPLE}
+        res = command({"spec": spec, "inputs": inputs, "scratch": payload["scratch"], "timeout": 20})
+        out = res.get("output") or {}
+        if res.get("ok") and (out.get("stdout") or "").strip() or out.get("stdout_base64"):
+            return {"ok": True, "bin": name, "sample_inputs": inputs, "sample_output": out, "expected_checked": False,
+                    "filter": True, "output": "stdout_auto"}
+    return None
+
+
 def cli_discover(payload: dict) -> dict:
     """Find a documented command-line example for one of the tools and run it as the sample."""
     bins: dict = payload["bins"]
@@ -962,6 +994,9 @@ def cli_discover(payload: dict) -> dict:
             continue
         return {"ok": True, "bin": ex["bin"], "sample_inputs": inputs, "sample_output": res["output"],
                 "expected_checked": ex["expected"] is not None, "examples_found": len(examples)}
+    filt = _probe_filters(bins, payload)
+    if filt is not None:
+        return filt
     return {"ok": False, "code": "needs_configuration", "tried": tried[:6],
             "reason": ("No runnable example of " + ", ".join(sorted(bins)) + " was found in the README"
                        if not examples else "None of the README examples of " + ", ".join(sorted(bins))

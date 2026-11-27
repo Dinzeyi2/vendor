@@ -102,6 +102,7 @@ def public_view(row: Dict[str, Any], base_url: str) -> Dict[str, Any]:
             "input_schema": m["input_schema"],
             "output_schema": m.get("output_schema"),
             "worker_profile": (row.get("spec") or {}).get("profile", "standard"),
+            **({"assets_source": row["spec"]["assets_source"]} if (row.get("spec") or {}).get("assets_source") else {}),
             "license": {"spdx": row["license_spdx"], "copyright": m["built_on"]["copyright"]},
             "example_request": {
                 "method": "POST", "url": f"{base_url}/v1/execute",

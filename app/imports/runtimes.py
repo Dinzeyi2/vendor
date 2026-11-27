@@ -331,12 +331,18 @@ def node_build(src: Path, plan: Dict[str, Any], out: Path) -> Dict[str, Any]:
         json.loads((proj / "package.json").read_text(encoding="utf-8", errors="replace")).get(k)
         for k in ("dependencies", "devDependencies", "optionalDependencies"))
     if has_deps:  # network, but no repo or dependency code runs (scripts disabled)
-        _steps([{"argv": fetch, "cwd": str(proj)}], network=True, writable=[proj, cache], timeout=FETCH_TIMEOUT,
-               env=env, what="fetch")
+        try:
+            _steps([{"argv": fetch, "cwd": str(proj)}], network=True, writable=[proj, cache], timeout=FETCH_TIMEOUT,
+                   env=env, what="fetch")
+        except ImportFailure:
+            if nd["manager"] != "npm" or "ci" not in fetch:
+                raise   # npm ci refuses lockfiles out of sync with package.json: resolve again instead
+            _steps([{"argv": pm + ["install", "--no-package-lock", "--ignore-scripts", "--no-audit", "--no-fund",
+                                   "--loglevel=error"], "cwd": str(proj)}],
+                   network=True, writable=[proj, cache], timeout=FETCH_TIMEOUT, env=env, what="fetch")
     steps = []
     if has_deps:  # now run the dependencies' install scripts (native addons), offline
-        steps.append({"argv": pm + (["rebuild", "--foreground-scripts"] if nd["manager"] == "npm" else ["rebuild"]),
-                      "cwd": str(proj)})
+        steps.append({"argv": _node_cmd("npm") + ["rebuild", "--foreground-scripts"], "cwd": str(proj)})
     script = (plan.get("build") or {}).get("script") or nd.get("build_script")
     if script:
         steps.append({"argv": pm + ["run", script], "cwd": str(proj)})
@@ -354,6 +360,15 @@ def node_bins(build: Dict[str, Any]) -> Dict[str, List[str]]:
     proj = Path(build["package_dir"])
     return {name: [node_bin(), str((proj / rel).resolve())] for name, rel in (build.get("bin") or {}).items()
             if isinstance(rel, str) and (proj / rel).is_file()}
+
+
+def _shipped_assets(src: Path, plan: Dict[str, Any]) -> bool:
+    base = src / plan["root"] if plan.get("root") else src
+    nd = plan.get("node") or {}
+    main = nd.get("style") or nd.get("main")
+    if isinstance(main, str) and (base / main).is_file() and main.endswith((".css", ".scss", ".sass", ".less")):
+        return True
+    return any((base / d).is_dir() and any((base / d).rglob("*.css")) for d in ("dist", "css", "build"))
 
 
 def collect_assets(build: Dict[str, Any], plan: Dict[str, Any], out: Path) -> Dict[str, Any]:
@@ -492,7 +507,10 @@ def discover(plan: Dict[str, Any], build: Dict[str, Any], entry_point: Optional[
     if runtime == "frontend" or (op and op["kind"] == "asset"):
         assets = build["assets"]
         paths = [a["path"] for a in assets]
-        spec = {"kind": "asset", "assets_dir": build["assets_dir"], "assets": assets}
+        rebuilt = build.get("rebuilt", True)
+        spec = {"kind": "asset", "assets_dir": build["assets_dir"], "assets": assets,
+                "assets_source": "rebuilt from source" if rebuilt else
+                "shipped with the package (the build failed: " + str(build.get("build_error") or "")[:200] + ")"}
         sample = {"path": build["primary"]}
         return {"spec": spec, "function": "assets", "summary": (build.get("summary") or "Built frontend assets") ,
                 "input_schema": {"type": "object", "properties": {"path": {"enum": paths, "description":
@@ -605,7 +623,7 @@ def _discover_command(plan, build, op, entry) -> Dict[str, Any]:
                                                         "(a new runtime); a command-line program works today"}] if libs else []),
                           {"executables": ["_cognex_build/program"]})
     res = sandbox.run("cli_discover", {"bins": bins, "readme": build.get("readme"), "entry_point": entry,
-                                       "env": _cmd_env(build)},
+                                       "env": _cmd_env(build), "repo_name": plan.get("repo_name")},
                       paths=[], timeout=DISCOVER_TIMEOUT, scratch_root=_scratch(), memory_mb=_mem(plan))
     if not res.get("ok"):
         name = sorted(bins)[0]
@@ -617,14 +635,14 @@ def _discover_command(plan, build, op, entry) -> Dict[str, Any]:
                                              "stdin": {"type": "string"}}},
                                          "sample_inputs": {"args": ["--version"]}}},
                           executables=sorted(bins), tried=res.get("tried") or [])
-    spec = {"kind": "command", "argv": [f"{{bin:{res['bin']}}}", "{args...}"], "stdin": "{stdin}", "output": "stdout",
-            "bins": {res["bin"]: bins[res["bin"]]}, "env": _cmd_env(build)}
+    spec = {"kind": "command", "argv": [f"{{bin:{res['bin']}}}", "{args...}"], "stdin": "{stdin}",
+            "output": res.get("output") or "stdout", "bins": {res["bin"]: bins[res["bin"]]}, "env": _cmd_env(build)}
     return {"spec": spec, "function": res["bin"], "summary": build.get("summary") or f"Run the {res['bin']} command",
             "input_schema": {"type": "object", "properties": {
                 "args": {"type": "array", "items": {"type": "string"}, "description": f"Command-line arguments for {res['bin']}"},
                 "stdin": {"type": "string", "description": "Text sent to standard input"}}},
             "sample_inputs": res["sample_inputs"], "sample_output": res["sample_output"],
-            "signature": f"{res['bin']} [args...] < stdin"}
+            "signature": f"{res['bin']} [args...] < stdin" + (" (standard-input filter)" if res.get("filter") else "")}
 
 
 def _verify_configured(plan, build, op, mode: str, spec: Dict[str, Any]) -> Dict[str, Any]:
@@ -709,7 +727,18 @@ def build(src: Path, plan: Dict[str, Any], commit: str, pins: Optional[List[str]
         if rt == "python":
             info = python_build(src, plan, tmp, commit, pins)
         elif rt in ("node", "frontend"):
-            info = node_build(src, plan, tmp)
+            try:
+                info = node_build(src, plan, tmp)
+            except ImportFailure as exc:
+                if rt != "frontend" or not _shipped_assets(src, plan):
+                    raise
+                # the build didn't run here, but the package ships its built CSS: publish that, and say so
+                shutil.rmtree(tmp / "src", ignore_errors=True)
+                proj = _copy_src(src, plan, tmp / "src")
+                info = {"runtime": "frontend", "package_dir": str(proj), "main": plan["node"].get("main"),
+                        "name": plan["node"].get("name"), "bin": {}, "readme": _readme(proj),
+                        "summary": plan["node"].get("description") or "", "typescript": False,
+                        "rebuilt": False, "build_error": exc.reason[:300]}
             if rt == "frontend" or (plan.get("operation") or {}).get("kind") == "asset":
                 info.update(collect_assets(info, plan, tmp))
         elif rt == "native":

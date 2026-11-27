@@ -157,6 +157,21 @@ def _first(base: Path, *names: str) -> Optional[str]:
     return next((n for n in names if (base / n).is_file()), None)
 
 
+def requirement_lines(text: str) -> List[str]:
+    """Requirements from a requirements.txt: joins `\\` continuations, drops comments, options
+    (--hash, -r, -e, --index-url...) and environment markers stay attached."""
+    joined = re.sub(r"\\\s*\n", " ", text)
+    out = []
+    for line in joined.splitlines():
+        line = line.split(" #")[0].strip()
+        if not line or line.startswith(("#", "-")):
+            continue
+        line = re.split(r"\s+--?\w", line)[0].strip()       # trailing per-requirement options (--hash=...)
+        if line and line[0].isalnum():
+            out.append(line)
+    return out
+
+
 def _setup_py_scripts(text: str) -> Dict[str, str]:
     try:
         tree = ast.parse(text)
@@ -206,7 +221,7 @@ def _python(base: Path) -> Optional[Dict[str, Any]]:
     req = _read(base / "requirements.txt")
     if req:
         info.setdefault("requires", [])
-        info["requires"] += [l.split("#")[0].strip() for l in req.splitlines() if l.strip() and l[0].isalnum()]
+        info["requires"] += requirement_lines(req)
     if setup_py and not info["scripts"]:
         info["scripts"] = _setup_py_scripts(setup_py)
     if setup_cfg and not info["scripts"]:

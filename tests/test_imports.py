@@ -676,3 +676,33 @@ def test_heavy_dependencies_move_an_import_to_the_large_worker_profile():
     assert profiles.choose(requirements=["torch>=2", "numpy"]) == "large"
     assert profiles.choose(download_bytes=30 * profiles.MB, requested="standard") == "standard"
     assert profiles.get("large")["call_memory_mb"] > profiles.get("standard")["call_memory_mb"]
+
+
+# -- shared rules added after the first acceptance run ------------------------------------------------
+def test_command_line_filter_without_readme_examples_is_probed_with_standard_input():
+    c = new_customer()
+    key = key_for(c, credits=1)
+    imp = ready(c, "pyfilter")
+    assert imp["status"] == "ready" and imp["operation"] == "pyfilter.pyfilter", imp
+    assert "standard-input filter" in imp["function"]
+    res = call(key, "pyfilter.pyfilter", {"args": [], "stdin": "abc\nxyz\n"})
+    assert res["output"]["stdout"].replace("\r", "") == "cba\nzyx\n"   # (CRLF line endings on Windows)
+
+
+@pytest.mark.skipif(not npm_cli(), reason="Node.js with npm is needed")
+def test_css_package_whose_build_fails_publishes_its_shipped_css():
+    c = new_customer()
+    key = key_for(c, credits=1)
+    imp = ready(c, "cssprebuilt")
+    assert imp["status"] == "ready" and imp["runtime"] == "frontend", imp
+    assert imp["assets_source"].startswith("shipped with the package")
+    css = call(key, imp["operation"], {"path": "css/prebuilt.css"})["output"]
+    assert ".card{" in css["content"]
+
+
+def test_service_whose_only_page_is_the_root_exposes_it():
+    c = new_customer()
+    key = key_for(c, credits=1)
+    imp = ready(c, "rootservice")
+    assert imp["status"] == "ready", imp
+    assert call(key, imp["operation"], {})["output"]["body"] == {"message": "Hello from the root"}

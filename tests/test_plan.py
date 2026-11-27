@@ -79,3 +79,20 @@ def test_configuration_format_accepts_endpoint_choices_and_profiles():
                           "service": {"start": ["python", "-m", "uvicorn", "app:app", "--port", "{port}"]}})
     with pytest.raises(ValueError):
         plan.validate_config({"entry_point": "rm -rf /"})
+
+
+def test_requirements_files_with_continuations_hashes_and_options():
+    cont = chr(92) + chr(10)   # a backslash at the end of a line
+    text = ("attrs==26.1.0 " + cont + "    --hash=sha256:abc " + cont + "    --hash=sha256:def" + chr(10) +
+            "flask>=2 ; python_version > '3.8'  # web" + chr(10) + "-r other.txt" + chr(10) + "# comment" + chr(10))
+    assert plan.requirement_lines(text) == ["attrs==26.1.0", "flask>=2 ; python_version > '3.8'"]
+
+
+def test_restructuredtext_code_directives_are_read_as_examples():
+    from app.imports import runner
+    rst = "Use\n\n.. code:: python\n\n    >>> import jmespath\n    >>> jmespath.search('a', {'a': 1})\n    1\n\nEnd\n"
+    assert ">>> jmespath.search('a', {'a': 1})" in runner._code_blocks(rst)[0]
+
+
+def test_a_root_only_service_exposes_its_root():
+    assert services.choose([{"method": "GET", "path": "/"}, {"method": "GET", "path": "/health"}], None)["path"] == "/"
