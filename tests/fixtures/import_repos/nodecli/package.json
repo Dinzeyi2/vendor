@@ -1,0 +1,1 @@
+{"name": "nodecli", "version": "1.0.0", "description": "Greets people.", "bin": {"nodecli": "cli.js"}}

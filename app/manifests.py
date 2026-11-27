@@ -35,6 +35,7 @@ MANIFEST_SCHEMA: Dict[str, Any] = {
         "intents": {"type": "array", "minItems": 3, "items": {"type": "string", "minLength": 3}},
         "clarify": {"type": "string", "minLength": 5, "maxLength": 300},
         "credits": {"const": 1},  # billing charges 1 credit per started operation
+        "long_running": {"type": "boolean"},  # runs as a background job (job_id + GET /v1/jobs/{id})
         "runtime": {
             "type": "object", "additionalProperties": False, "required": ["kind", "internal"],
             "properties": {
@@ -114,6 +115,7 @@ class Capability:
     aliases: Tuple[str, ...] = ()
     clarify: Optional[str] = None
     when_to_use: Optional[str] = None
+    long_running: bool = False
     credits: int = 1
     data_bindings: Tuple[Dict[str, Any], ...] = ()
     engine_fields: Tuple[str, ...] = ()
@@ -150,6 +152,7 @@ def parse(raw: Dict[str, Any], path: Optional[str] = None) -> Capability:
         default_timeout=float(t["default"]), max_timeout=float(t["max"]), input_schema=raw["input_schema"],
         example=raw["example"], aliases=tuple(raw.get("aliases", [])), clarify=raw.get("clarify"),
         when_to_use=raw.get("when_to_use"),
+        long_running=bool(raw.get("long_running", False)),
         credits=raw.get("credits", 1), data_bindings=tuple(raw.get("data_bindings", [])),
         engine_fields=tuple(raw.get("engine_fields", [])),
         built_on=BuiltOn(b["project"], b["license"], b["copyright"], b["source"], b["license_file"],

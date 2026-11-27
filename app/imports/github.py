@@ -1,11 +1,13 @@
 """Public GitHub repositories: URL validation, commit pinning and size-limited download.
 
 Trusted code. Talks only to github.com (git smart-HTTP ref advertisement, no API token or API
-rate limit) and codeload.github.com (the tarball of one exact commit). Never runs repo code.
+rate limit), codeload.github.com (the tarball of one exact commit) and, for git submodules only,
+api.github.com (which commit each submodule is pinned to). Never runs repo code.
 """
 from __future__ import annotations
 
 import io
+import json
 import re
 import shutil
 import tarfile
@@ -85,8 +87,7 @@ def _pkt_lines(data: bytes):
         i += n
 
 
-def resolve_commit(ref: RepoRef) -> str:
-    """The exact commit SHA for the default branch (or the given branch/tag) of a public repo."""
+def _refs(ref: RepoRef):
     url = f"https://github.com/{ref.full_name}.git/info/refs?service=git-upload-pack"
     try:
         data = _get(url, 8 * 1024 * 1024, timeout=20)
@@ -107,6 +108,12 @@ def resolve_commit(ref: RepoRef) -> str:
             refs[name] = sha
             if name == "HEAD":
                 head = sha
+    return refs, head
+
+
+def resolve_commit(ref: RepoRef) -> str:
+    """The exact commit SHA for the default branch (or the given branch/tag) of a public repo."""
+    refs, head = _refs(ref)
     if ref.ref is None:
         if not head:
             raise ImportFailure("repo_empty", f"{ref.url} has no commits.")
@@ -119,8 +126,66 @@ def resolve_commit(ref: RepoRef) -> str:
     raise ImportFailure("ref_not_found", f"{ref.url} has no branch or tag named '{ref.ref}'.")
 
 
-def download(ref: RepoRef, commit: str, dest: Path) -> Path:
-    """Fetch and safely extract one commit into dest (replaced). Returns dest."""
+def version_hint(ref: RepoRef, commit: str) -> Optional[str]:
+    """The release version a commit is tagged with (v1.2.3 -> 1.2.3), for builds whose version comes
+    from git metadata that a tarball doesn't have. None if no tag points at the commit."""
+    try:
+        refs, _ = _refs(ref)
+    except ImportFailure:
+        return None
+    for name, sha in refs.items():
+        if sha == commit and name.startswith("refs/tags/"):
+            tag = name[len("refs/tags/"):].removesuffix("^{}")
+            m = re.search(r"(\d+(?:\.\d+)+(?:[.-]?(?:a|b|rc|post|dev)\d*)?)$", tag)
+            if m:
+                return m.group(1)
+    return None
+
+
+def download(ref: RepoRef, commit: str, dest: Path, submodules: bool = True) -> Path:
+    """Fetch and safely extract one commit into dest (replaced), plus its git submodules that
+    live on GitHub (tarballs leave them out). Returns dest."""
+    _extract(ref, commit, dest)
+    if submodules and (dest / ".gitmodules").is_file():
+        _submodules(ref, commit, dest, depth=0, budget=[MAX_EXTRACTED * 3])
+    return dest
+
+
+def _submodules(ref: RepoRef, commit: str, dest: Path, depth: int, budget: list) -> None:
+    text = (dest / ".gitmodules").read_text(encoding="utf-8", errors="replace")
+    for section in re.split(r"(?m)^\s*\[submodule\b", text)[1:]:
+        path = re.search(r"(?m)^\s*path\s*=\s*(\S+)", section)
+        url = re.search(r"(?m)^\s*url\s*=\s*(\S+)", section)
+        if not path or not url:
+            continue
+        path, url = path.group(1), url.group(1)
+        rel = Path(path)
+        if rel.is_absolute() or ".." in rel.parts:
+            continue
+        if url.startswith("../"):  # relative to the parent repo's owner
+            url = f"https://github.com/{ref.owner}/{url[3:]}"
+        m = re.match(rf"^(?:https://|git@|git://)github\.com[:/]({OWNER_RE})/({REPO_RE}?)(?:\.git)?/?$", url)
+        if not m:
+            raise ImportFailure("unsupported_dependency", f"Submodule '{path}' isn't hosted on GitHub ({url[:120]}); "
+                                                          f"Cognex can only fetch GitHub submodules.", submodule=path)
+        try:
+            meta = json.loads(_get(f"https://api.github.com/repos/{ref.full_name}/contents/{path}?ref={commit}",
+                                   1024 * 1024, timeout=30))
+        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError, ImportFailure):
+            raise ImportFailure("github_unavailable", f"GitHub didn't say which commit submodule '{path}' is "
+                                                      f"pinned to (the API may be rate limited); try again later.",
+                                submodule=path) from None
+        sha = meta.get("sha") if isinstance(meta, dict) and meta.get("type") == "submodule" else None
+        if not sha or not re.fullmatch(r"[0-9a-f]{40}", sha):
+            continue
+        sub = RepoRef(m.group(1), m.group(2), None)
+        target = dest / rel
+        _extract(sub, sha, target, budget)
+        if depth < 2 and (target / ".gitmodules").is_file():
+            _submodules(sub, sha, target, depth + 1, budget)
+
+
+def _extract(ref: RepoRef, commit: str, dest: Path, budget: Optional[list] = None) -> None:
     try:
         blob = _get(f"https://codeload.github.com/{ref.full_name}/tar.gz/{commit}", MAX_DOWNLOAD, timeout=120)
     except urllib.error.HTTPError as exc:
@@ -132,6 +197,7 @@ def download(ref: RepoRef, commit: str, dest: Path) -> Path:
         shutil.rmtree(dest)
     dest.mkdir(parents=True)
     total = count = 0
+    limit = MAX_EXTRACTED if budget is None else min(MAX_EXTRACTED, budget[0])
     with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tar:
         for member in tar:
             parts = member.name.split("/", 1)
@@ -141,8 +207,9 @@ def download(ref: RepoRef, commit: str, dest: Path) -> Path:
             total += member.size
             if count > MAX_FILES:
                 raise ImportFailure("repo_too_large", f"The repository has more than {MAX_FILES} files.")
-            if total > MAX_EXTRACTED:
-                raise ImportFailure("repo_too_large", f"The repository is larger than {MAX_EXTRACTED // (1024 * 1024)} MB.")
+            if total > limit:
+                raise ImportFailure("repo_too_large", f"The repository (with its submodules) is larger than "
+                                                      f"{MAX_EXTRACTED // (1024 * 1024)} MB.")
             rel = Path(parts[1])
             if rel.is_absolute() or ".." in rel.parts:
                 continue
@@ -152,4 +219,9 @@ def download(ref: RepoRef, commit: str, dest: Path) -> Path:
             if src is not None:
                 with open(target, "wb") as fh:
                     shutil.copyfileobj(src, fh)
-    return dest
+                try:  # keep the executable bit (configure scripts, build helpers); nothing else
+                    target.chmod(0o755 if member.mode & 0o111 else 0o644)
+                except OSError:
+                    pass
+    if budget is not None:
+        budget[0] -= total

@@ -14,7 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import accounts, db
-from app.imports import github, jobs, private
+from app.imports import github, jobs, private, runtimes
 from app.main import app
 
 pgserver = pytest.importorskip("pgserver")
@@ -47,7 +47,7 @@ def fake_commit(ref):
 def fake_fetch(ref, commit, dest):
     if dest.exists():
         shutil.rmtree(dest)
-    shutil.copytree(FIXTURES / ref.repo, dest)
+    shutil.copytree(FIXTURES / ref.repo.split("--")[0], dest)   # "name--variant": same files, another repo
     return dest
 
 
@@ -56,18 +56,24 @@ def verify_in_process(customer_id, import_id, operation, inputs):
     key = accounts.create_key(customer_id, "Import check (automatic)", kind="import_check", scope=import_id)
     try:
         r = client.post("/v1/execute", headers={"X-API-Key": key["secret"]},
-                        json={"tasks": [{"id": "import-check", "operation": operation, "inputs": inputs}]})
+                        json={"tasks": [{"id": "import-check", "operation": operation, "inputs": inputs, "async": False}]})
         return r.status_code, r.json()
     finally:
         accounts.revoke_key(customer_id, uuid.UUID(key["id"]))
 
 
+@pytest.fixture(scope="module")
+def build_cache(tmp_path_factory):
+    return tmp_path_factory.mktemp("builds")   # shared by the module's tests: same repo + commit = reused build
+
+
 @pytest.fixture(autouse=True)
-def env(monkeypatch, database_url, tmp_path):
+def env(monkeypatch, database_url, tmp_path, build_cache):
     db.close()
     for k, v in {"DATABASE_URL": database_url, "WEBSITE_BACKEND_SECRET": SERVER_SECRET, "API_KEY": OPERATOR_KEY,
                  "CREDITS_GRANT_SECRET": GRANT_SECRET, "BILLING_MODE": "on", "COGNEX_SANDBOX": "insecure-dev",
-                 "IMPORTS_DIR": str(tmp_path / "imports"), "COGNEX_PUBLIC_URL": "https://cognex.example"}.items():
+                 "IMPORTS_DIR": str(tmp_path / "imports"), "COGNEX_PUBLIC_URL": "https://cognex.example",
+                 "COGNEX_BUILDS_DIR": str(build_cache)}.items():
         monkeypatch.setenv(k, v)
     monkeypatch.setattr(github, "resolve_commit", fake_commit)
     monkeypatch.setattr(jobs, "FETCH", fake_fetch)
@@ -224,7 +230,7 @@ def test_agpl_repo_is_no_longer_blocked_and_reaches_the_build_step(monkeypatch):
     import_id = submit(c, "agpl").json()["id"]
     run_worker()
     imp = status_of(c, import_id)
-    assert stages == ["fetching", "reading_license", "analyzing", "installing", "discovering", "registering",
+    assert stages == ["fetching", "reading_license", "analyzing", "building", "discovering", "registering",
                       "verifying", "ready"], stages            # past the license, through the build step
     assert imp["status"] == "ready" and "failure" not in imp, imp
     assert imp["license"]["spdx"] == "AGPL-3.0"                # attribution kept
@@ -367,7 +373,9 @@ def test_ready_import_rebuilds_after_its_files_are_wiped(tmp_path):
     key = key_for(c)
     import_id = submit(c, "geodist").json()["id"]
     run_worker()
-    shutil.rmtree(jobs.imports_dir() / import_id)              # e.g. a redeploy without a volume
+    build_key = jobs.get_any(uuid.UUID(import_id))["build_key"]
+    shutil.rmtree(jobs.imports_dir() / import_id, ignore_errors=True)   # e.g. a redeploy without a volume
+    shutil.rmtree(runtimes.builds_dir() / build_key)                    # ...and the build cache is gone too
     res = execute(key, [{"id": "1", "operation": "geodist.geodist",
                          "inputs": {"point1": [0, 0], "point2": [0, 1]}}]).json()["results"][0]
     assert res["status"] == "ok" and abs(res["output"]["result"] - 111.195) < 0.01
@@ -462,3 +470,150 @@ def test_publish_rules():
     for headers in ({"X-API-Key": key}, site(c), {}):
         assert client.post("/v1/admin/imports", headers=headers,
                            json={"url": "https://github.com/cognex-fixtures/geodist"}).status_code in (401, 403)
+
+
+# -- the general importer: every runtime through the same pipeline ------------------------------------
+from app.config import node_bin, npm_cli, tool  # noqa: E402
+
+
+def ready(customer, repo, **extra):
+    r = submit(customer, repo, **extra)
+    assert r.status_code in (200, 202), r.text
+    run_worker()
+    return status_of(customer, r.json()["id"])
+
+
+def call(key, op, inputs, **task):
+    return execute(key, [{"id": "1", "operation": op, "inputs": inputs, **task}]).json()["results"][0]
+
+
+def test_python_package_is_built_before_import_so_generated_modules_exist():
+    c = new_customer()
+    key = key_for(c, credits=2)
+    imp = ready(c, "genversion")            # importing the source tree fails: _version.py is made by the build
+    assert imp["status"] == "ready" and imp["runtime"] == "python", imp
+    assert call(key, imp["operation"], {"x": 21})["output"] == {"result": 42}
+
+
+def test_python_command_line_tool_becomes_a_command_operation():
+    c = new_customer()
+    key = key_for(c, credits=2)
+    imp = ready(c, "pycli")
+    assert imp["status"] == "ready" and imp["operation"] == "pycli.pycli", imp
+    assert imp["example_response"]["results"][0]["output"]["stdout"].strip() == "HELLO WORLD"
+    res = call(key, "pycli.pycli", {"args": [], "stdin": "stressed"})
+    assert res["status"] == "ok" and res["output"]["stdout"].strip() == "desserts"
+
+
+def test_class_only_library_says_what_is_missing_then_a_saved_configuration_fixes_it():
+    c = new_customer()
+    key = key_for(c, credits=2)
+    imp = ready(c, "shapes")
+    assert imp["status"] == "failed" and imp["failure"]["code"] == "no_callable_function", imp
+    assert imp["failure"]["missing"][0]["field"] == "operation"            # exactly what a configuration must add
+    assert imp["failure"]["config_template"]["operation"]["kind"] == "function"
+    config = {"operation": {
+        "kind": "function", "name": "area", "summary": "Area of a polygon given its corner points.",
+        "target": "shapes:Polygon", "args": {"points": "{points}"}, "then": [{"attr": "area"}],
+        "input_schema": {"type": "object", "required": ["points"], "properties": {
+            "points": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}}}},
+        "sample_inputs": {"points": [[0, 0], [4, 0], [4, 3]]}, "expected_output": 6.0}}
+    assert admin("PUT", "/v1/admin/repo-configs/cognex-fixtures/shapes", json={"runtime": "nodejs"}).status_code == 422
+    r = admin("PUT", "/v1/admin/repo-configs/cognex-fixtures/shapes", json=config)
+    assert r.status_code == 200 and imp["id"] in r.json()["requeued_imports"], r.text
+    run_worker()
+    imp = status_of(c, imp["id"])
+    assert imp["status"] == "ready" and imp["operation"] == "shapes.area", imp
+    assert call(key, "shapes.area", {"points": [[0, 0], [2, 0], [2, 2], [0, 2]]})["output"] == {"result": 4.0}
+    other = new_customer()                   # the saved configuration is reused by later imports
+    key2 = key_for(other, credits=1)
+    assert ready(other, "shapes")["status"] == "ready"
+    assert call(key2, "shapes.area", {"points": [[0, 0], [1, 0], [0, 1]]})["output"] == {"result": 0.5}
+    assert admin("GET", "/v1/admin/repo-configs/cognex-fixtures/shapes").json()["config"] == config
+
+
+@pytest.mark.skipif(not npm_cli(), reason="Node.js with npm is needed")
+def test_node_library_is_discovered_from_its_readme_examples():
+    c = new_customer()
+    key = key_for(c, credits=2)
+    imp = ready(c, "nodeslug")
+    assert imp["status"] == "ready" and imp["runtime"] == "node", imp
+    assert imp["example_response"]["results"][0]["output"] == {"result": "deja-vu-again"}
+    assert imp["input_schema"]["required"] == ["text"]
+    assert call(key, imp["operation"], {"text": "Hello Node World"})["output"] == {"result": "hello-node-world"}
+
+
+@pytest.mark.skipif(not npm_cli(), reason="Node.js with npm is needed")
+def test_node_command_line_tool():
+    c = new_customer()
+    key = key_for(c, credits=1)
+    imp = ready(c, "nodecli")
+    assert imp["status"] == "ready" and imp["operation"] == "nodecli.nodecli", imp
+    res = call(key, "nodecli.nodecli", {"args": ["greet", "Grace"]})
+    assert res["status"] == "ok" and res["output"]["stdout"].strip() == "Hello, Grace!"
+
+
+def test_css_package_becomes_frontend_assets():
+    c = new_customer()
+    key = key_for(c, credits=2)
+    imp = ready(c, "cssfw")
+    assert imp["status"] == "ready" and imp["runtime"] == "frontend" and imp["operation"] == "cssfw.assets", imp
+    listing = call(key, "cssfw.assets", {})["output"]["assets"]
+    assert {a["path"] for a in listing} == {"dist/cssfw.css", "dist/cssfw.min.css"}
+    css = call(key, "cssfw.assets", {"path": "dist/cssfw.css"})["output"]
+    assert css["content_type"] == "text/css" and ".btn{" in css["content"]
+
+
+@pytest.mark.skipif(not (tool("cmake") and (tool("cc") or tool("gcc"))), reason="a C toolchain and CMake are needed")
+def test_native_cmake_program_becomes_a_command_operation():
+    c = new_customer()
+    key = key_for(c, credits=1)
+    imp = ready(c, "cnative")
+    assert imp["status"] == "ready" and imp["runtime"] == "native", imp
+    assert call(key, imp["operation"], {"args": [], "stdin": "abc"})["output"]["stdout"] == "ABC"
+
+
+@pytest.mark.parametrize("repo, runtime, words", [("dockeronly", "container", "container runtime"),
+                                                   ("pixiapp", "conda", "conda/pixi")])
+def test_projects_without_a_runtime_say_exactly_what_is_missing(repo, runtime, words):
+    c = new_customer()
+    imp = ready(c, repo)
+    assert imp["status"] == "failed" and imp["failure"]["code"] == "runtime_not_available", imp
+    assert imp["failure"]["runtime"] == runtime and words in imp["failure"]["reason"]
+    assert imp["failure"]["missing"]
+
+
+def test_the_same_repo_commit_and_configuration_reuse_one_build():
+    a, b = new_customer(), new_customer()
+    first, second = ready(a, "genversion"), ready(b, "genversion")
+    rows = [jobs.get_any(uuid.UUID(i["id"])) for i in (first, second)]
+    assert rows[0]["build_key"] == rows[1]["build_key"]
+    assert (runtimes.builds_dir() / rows[0]["build_key"] / "build.json").is_file()
+    assert len([p for p in runtimes.builds_dir().iterdir() if p.name == rows[0]["build_key"]]) == 1
+
+
+def test_long_running_operations_return_a_job_id_and_the_result_comes_from_the_jobs_api():
+    import time
+    config = {"operation": {
+        "kind": "function", "name": "double", "summary": "Double a number in a background job.",
+        "target": "genversion:genversion", "args": {"x": "{x}"}, "long_running": True,
+        "input_schema": {"type": "object", "required": ["x"], "properties": {"x": {"type": "number"}}},
+        "sample_inputs": {"x": 2}, "expected_output": 4}}
+    assert admin("PUT", "/v1/admin/repo-configs/cognex-fixtures/genversion--lr", json=config).status_code == 200
+    c = new_customer()
+    key = key_for(c, credits=3)
+    imp = ready(c, "genversion--lr")
+    assert imp["status"] == "ready", imp
+    res = call(key, imp["operation"], {"x": 5})
+    assert res["status"] == "queued" and res["job_id"], res
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        job = client.get(f"/v1/jobs/{res['job_id']}", headers={"X-API-Key": key}).json()
+        if job["status"] in ("ok", "error"):
+            break
+        time.sleep(0.3)
+    assert job["status"] == "ok" and job["output"] == {"result": 10} and job["credits_charged"] == 1, job
+    assert balance(c) == 2
+    assert call(key, imp["operation"], {"x": 1}, **{"async": False})["output"] == {"result": 2}   # direct on request
+    other = key_for(new_customer(), credits=0)
+    assert client.get(f"/v1/jobs/{res['job_id']}", headers={"X-API-Key": other}).status_code == 404

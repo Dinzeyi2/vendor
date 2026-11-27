@@ -6,16 +6,18 @@ import logging
 import os
 import secrets
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Literal, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, Security, status
+from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app import accounts, billing, catalog, db, discovery, router
+from app import accounts, async_jobs, billing, catalog, db, discovery, router
 from app.imports import jobs as import_jobs, private as private_imports
 from app.account_api import router as account_router
 from app.billing_api import error_response, router as billing_router
@@ -38,6 +40,7 @@ async def lifespan(_app: FastAPI):
     maintenance = importer = None
     if db.configured():  # migrate at boot; failures are retried on first use
         loop.run_in_executor(_executor, _init_db)
+        loop.run_in_executor(_executor, _mark_lost_jobs)
         maintenance = billing.Maintenance()  # heartbeat + release reservations of dead API processes
         maintenance.start()
         if import_jobs.enabled():
@@ -54,6 +57,13 @@ async def lifespan(_app: FastAPI):
     old, _executor = _executor, ThreadPoolExecutor(max_workers=64, thread_name_prefix="task")
     old.shutdown(wait=False, cancel_futures=True)
     db.close()
+
+
+def _mark_lost_jobs() -> None:
+    try:
+        async_jobs.mark_lost()
+    except Exception as exc:  # noqa: BLE001 - before migrations ran, or the database is down
+        log.info("job sweep skipped: %s", type(exc).__name__)
 
 
 def _init_db() -> None:
@@ -121,6 +131,11 @@ class Task(BaseModel):
                                    description="Plain-English goal, e.g. 'Compare these two names' (instead of operation)")
     data: Any = Field(default=None, description="The data for a plain-English request, in any reasonable shape")
     timeout_s: Optional[float] = Field(default=None, gt=0, description="Override the operation's default timeout (capped).")
+    run_async: Optional[bool] = Field(default=None, alias="async",
+                                      description="Run as a background job: the result is status 'queued' with a "
+                                                  "job_id; fetch it from GET /v1/jobs/{job_id}. Long-running "
+                                                  "operations do this by default; false forces a direct answer.")
+    model_config = ConfigDict(populate_by_name=True)
 
     @model_validator(mode="after")
     def operation_or_request(self) -> "Task":
@@ -148,7 +163,8 @@ ErrorType = Literal["unknown_operation", "invalid_input", "operation_failed", "t
 class TaskResult(BaseModel):
     id: str
     operation: Optional[str] = None   # the operation that ran (for plain-English requests: the one chosen)
-    status: Literal["ok", "error", "needs_clarification"]
+    status: Literal["ok", "error", "needs_clarification", "queued"]
+    job_id: Optional[str] = None      # queued: GET /v1/jobs/{job_id} returns the result
     output: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     error_type: Optional[ErrorType] = None
@@ -380,7 +396,17 @@ async def execute(request: ExecuteRequest, caller: Caller = Depends(require_api_
         if any(t.operation not in private for t in request.tasks):
             raise HTTPException(status.HTTP_403_FORBIDDEN, detail="this key may only call the import it verifies")
     plans = await loop.run_in_executor(_executor, lambda: [_plan(t, private) for t in request.tasks])
-    runnable = [p for p in plans if p.runnable]
+    background = [p for p in plans if p.runnable and _runs_as_job(p, private)]
+    queued: Dict[str, TaskResult] = {}
+    if background:
+        if not db.configured():
+            raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="background jobs need the database")
+        for p in background:  # each job reserves its own credit and runs on its own
+            res = await _start_job(p, caller, private)
+            if isinstance(res, JSONResponse):
+                return res
+            queued[p.task.id] = res
+    runnable = [p for p in plans if p.runnable and p.task.id not in queued]
     cost = len(runnable) * catalog.CREDITS_PER_OPERATION
     if owner is not None and owner.kind == "customer" and cost and billing.enforced():
         max_seconds = sum(min(p.task.timeout_s or p.spec.default_timeout, p.spec.max_timeout) for p in runnable) + 120
@@ -394,7 +420,10 @@ async def execute(request: ExecuteRequest, caller: Caller = Depends(require_api_
     charged = 0
     try:
         on_start = reservation.mark_started if reservation else None
-        results = list(await asyncio.gather(*(_run(p, caller.kind == "operator", on_start) for p in plans)))
+        direct = [p for p in plans if p.task.id not in queued]
+        ran = dict(zip([p.task.id for p in direct],
+                       await asyncio.gather(*(_run(p, caller.kind == "operator", on_start) for p in direct))))
+        results = [queued.get(p.task.id) or ran[p.task.id] for p in plans]
     finally:
         if reservation is not None:  # charge started operations, release the rest (also on errors)
             try:
@@ -403,8 +432,58 @@ async def execute(request: ExecuteRequest, caller: Caller = Depends(require_api_
                 log.error("settling reservation %s failed: %s", reservation.id, type(exc).__name__)
                 charged = reservation.started
     if owner is not None and owner.kind == "customer":
-        await _record_usage(owner, (time.perf_counter() - started) * 1000, results, charged, private)
+        await _record_usage(owner, (time.perf_counter() - started) * 1000,
+                            [r for r in results if r.status != "queued"], charged, private)
     return ExecuteResponse(results=results)
+
+
+def _runs_as_job(p: "_Plan", private: Dict[str, Any]) -> bool:
+    if p.task.run_async is not None:
+        return bool(p.task.run_async)
+    cap = CAPABILITIES.get(p.public) or (private.get(p.public) or (None,))[0]
+    return bool(getattr(cap, "long_running", False))
+
+
+async def _start_job(p: "_Plan", caller: "Caller", private: Dict[str, Any]):
+    """Queue one task as a background job (its credit is reserved now and settled when it ends)."""
+    loop = asyncio.get_running_loop()
+    owner = caller.owner
+    reservation = None
+    if owner is not None and owner.kind == "customer" and billing.enforced():
+        max_seconds = min(p.task.timeout_s or p.spec.default_timeout, p.spec.max_timeout) + 120
+        try:
+            reservation = await loop.run_in_executor(_executor, billing.reserve, owner, catalog.CREDITS_PER_OPERATION,
+                                                     max_seconds)
+        except billing.BillingError as exc:
+            return error_response(exc)
+    job_id = await loop.run_in_executor(_executor, async_jobs.create, owner.customer_id if owner else None,
+                                        owner.key_id if owner else None, p.echo or p.public)
+
+    def record(result: "TaskResult", charged: int) -> None:
+        if owner is not None and owner.kind == "customer":
+            accounts.record_usage(owner, result.duration_ms, [{
+                "operation": _usage_name(result, private), "status": result.status,
+                "error_type": result.error_type, "duration_ms": result.duration_ms}], charged)
+
+    async_jobs.start(job_id, lambda on_start: _run(p, caller.kind == "operator", on_start), reservation, record)
+    return TaskResult(id=p.task.id, operation=p.echo, routing=p.routing, status="queued", job_id=str(job_id),
+                      duration_ms=0.0)
+
+
+@app.get("/v1/jobs/{job_id}")
+def get_job(job_id: uuid.UUID, caller: Caller = Depends(require_api_key)) -> Dict[str, Any]:
+    """The result of a background job started by POST /v1/execute (same customer, any of its keys).
+
+    status: queued | running | ok (output) | error (error_type, error). Results are kept for a day."""
+    if caller.owner is not None and caller.owner.kind != "customer":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "job not found")
+    try:
+        job = async_jobs.get(job_id, caller.owner.customer_id if caller.owner else None)
+    except db.DatabaseUnavailable:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail="job store unavailable") from None
+    if job is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "job not found")
+    return job
 
 
 def _usage_name(r: TaskResult, private: Dict[str, Any]) -> str:

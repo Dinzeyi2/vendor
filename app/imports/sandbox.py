@@ -48,24 +48,53 @@ def _env(scratch: str) -> Dict[str, str]:
     return env
 
 
+# Resource presets: quick calls, builds (compilers, package managers), dependency fetches.
+PROFILES = {
+    "call": {"memory_mb": 2048, "file_mb": 64, "open_files": 256, "processes": 64},
+    "build": {"memory_mb": 6144, "file_mb": 1024, "open_files": 4096, "processes": 512},
+    "fetch": {"memory_mb": 4096, "file_mb": 1024, "open_files": 4096, "processes": 256},
+}
+
+
+def _own(paths: List[Path], uid: int) -> None:
+    """chown -R (and, for root, drop group/other write) so a build's files can't be changed later."""
+    for top in paths:
+        for dirpath, dirnames, filenames in os.walk(top):
+            for name in [dirpath, *[os.path.join(dirpath, n) for n in dirnames + filenames]]:
+                try:
+                    os.lchown(name, uid, uid)
+                    if uid == 0 and not os.path.islink(name):
+                        os.chmod(name, os.stat(name).st_mode & ~0o022)
+                except OSError:
+                    pass
+
+
 def run(sandbox_mode: str, payload: Dict[str, Any], *, paths: List[str], timeout: float,
-        memory_mb: int = 2048, cpu_seconds: Optional[int] = None, scratch_root: Optional[Path] = None,
-        on_start=None) -> Dict[str, Any]:
-    """Run runner.MODES[sandbox_mode](payload) in the sandbox; returns its (untrusted) result dict."""
+        memory_mb: Optional[int] = None, cpu_seconds: Optional[int] = None, scratch_root: Optional[Path] = None,
+        on_start=None, profile: str = "call", network: bool = False,
+        writable: Optional[List[Path]] = None) -> Dict[str, Any]:
+    """Run runner.MODES[sandbox_mode](payload) in the sandbox; returns its (untrusted) result dict.
+
+    `writable` folders are handed to the run's uid for its duration (builds) and given back to root
+    afterwards, read-only for everyone else. `network` is only for the dependency-fetch step."""
     uid = random.randint(20000, 59999)
     root = Path(scratch_root or tempfile.gettempdir())
     root.mkdir(parents=True, exist_ok=True)
     scratch = tempfile.mkdtemp(prefix="sbx-", dir=root)
     strict = mode() == "strict"
+    owns = strict and hasattr(os, "chown") and os.geteuid() == 0
+    prof = PROFILES[profile]
     try:
-        if strict and hasattr(os, "chown") and os.geteuid() == 0:
+        if owns:
             os.chown(scratch, uid, uid)
             os.chmod(scratch, 0o700)
-        cfg = {"mode": sandbox_mode, "payload": payload, "uid": uid, "strict": strict, "app_dir": str(ROOT),
-               "paths": [str(p) for p in paths],
-               "limits": {"memory_bytes": memory_mb * 1024 * 1024,
-                          "cpu_seconds": int(cpu_seconds or timeout + 5), "file_bytes": 64 * 1024 * 1024,
-                          "open_files": 256, "processes": 64}}
+            _own([Path(p) for p in writable or []], uid)
+        cfg = {"mode": sandbox_mode, "payload": {**payload, "scratch": scratch}, "uid": uid, "strict": strict,
+               "app_dir": str(ROOT), "paths": [str(p) for p in paths], "network": bool(network),
+               "limits": {"memory_bytes": (memory_mb or prof["memory_mb"]) * 1024 * 1024,
+                          "cpu_seconds": int(cpu_seconds or timeout + 5),
+                          "file_bytes": prof["file_mb"] * 1024 * 1024,
+                          "open_files": prof["open_files"], "processes": prof["processes"]}}
         out_path, err_path = Path(scratch) / ".result", Path(scratch) / ".stderr"
         with open(out_path, "wb") as out, open(err_path, "wb") as err:
             kwargs = {"start_new_session": True} if os.name == "posix" else {}
@@ -101,6 +130,8 @@ def run(sandbox_mode: str, payload: Dict[str, Any], *, paths: List[str], timeout
                     "error": why, "reason": why, "stderr_tail": tail}
         return result
     finally:
+        if owns and writable:
+            _own([Path(p) for p in writable], 0)
         shutil.rmtree(scratch, ignore_errors=True)
 
 

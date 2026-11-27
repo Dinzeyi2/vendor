@@ -16,6 +16,13 @@ Operator (X-API-Key = the operator key): add a GitHub repo and publish it for ev
 - POST /v1/admin/imports/{id}/publish    {"name": "category.action", optional "summary", "when_to_use"}
 - POST /v1/admin/imports/{id}/unpublish
 - POST /v1/admin/imports/{id}/refresh-attribution   re-detect license + copyright from the pinned commit
+
+Repo configurations (operator): the one standard way to fix a repo Cognex can't fully detect.
+- GET    /v1/admin/repo-configs                       all saved configurations
+- GET    /v1/admin/repo-configs/schema                the configuration format (JSON Schema)
+- GET    /v1/admin/repo-configs/{owner}/{repo}
+- PUT    /v1/admin/repo-configs/{owner}/{repo}        save (validated); re-queues that repo's failed imports
+- DELETE /v1/admin/repo-configs/{owner}/{repo}
 """
 from __future__ import annotations
 
@@ -30,7 +37,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app import db, discovery
 from app.account_api import signed_in_customer
 from app.billing_api import require_operator
-from app.imports import jobs, sandbox
+from app.imports import configs, jobs, plan as plans, sandbox
 
 router = APIRouter()
 
@@ -80,12 +87,61 @@ def get_import(import_id: uuid.UUID, request: Request, customer_id: str = Depend
     return jobs.public_view(row, _base_url(request))
 
 
+_REPO = r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$"
+_NAME = r"^[A-Za-z0-9._-]{1,100}$"
+
+
+@router.get("/v1/admin/repo-configs", dependencies=[Depends(require_operator)], include_in_schema=False)
+def list_repo_configs():
+    return {"configs": jsonable_encoder(_call(configs.list_all))}
+
+
+@router.get("/v1/admin/repo-configs/schema", dependencies=[Depends(require_operator)], include_in_schema=False)
+def repo_config_schema():
+    return plans.CONFIG_SCHEMA
+
+
+@router.get("/v1/admin/repo-configs/{owner}/{repo}", dependencies=[Depends(require_operator)], include_in_schema=False)
+def get_repo_config(owner: str, repo: str):
+    found = _call(configs.view, f"{owner}/{repo}")
+    if found is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no configuration saved for this repository")
+    return jsonable_encoder(found)
+
+
+@router.put("/v1/admin/repo-configs/{owner}/{repo}", dependencies=[Depends(require_operator)], include_in_schema=False)
+def put_repo_config(owner: str, repo: str, body: dict):
+    import re as _re
+    if not _re.match(_REPO, owner) or not _re.match(_NAME, repo):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "use the repository's OWNER/REPO")
+    try:
+        saved = _call(configs.save, f"{owner}/{repo}", body)
+    except ValueError as exc:
+        return JSONResponse(status_code=422, content={"error": "invalid_config", "message": str(exc)})
+    requeued = _call(jobs.requeue_failed, f"{owner}/{repo}")
+    return jsonable_encoder({**saved, "requeued_imports": requeued})
+
+
+@router.delete("/v1/admin/repo-configs/{owner}/{repo}", dependencies=[Depends(require_operator)], include_in_schema=False)
+def delete_repo_config(owner: str, repo: str):
+    if not _call(configs.delete, f"{owner}/{repo}"):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no configuration saved for this repository")
+    return {"deleted": f"{owner}/{repo}".lower()}
+
+
 @router.get("/v1/admin/imports/sandbox-selftest", dependencies=[Depends(require_operator)], include_in_schema=False)
 def sandbox_selftest():
     """Runs Cognex's own probe inside the sandbox (no customer code) and reports what it could do."""
-    res = sandbox.run("selftest", {"app_dir": "/app", "alloc_bytes": 3 * 1024 ** 3}, paths=[], timeout=60,
-                      scratch_root=jobs.imports_dir() / "tmp")
-    return {"sandbox_mode": sandbox.mode(), "result": res}
+    from app.config import node_bin
+    res = sandbox.run("selftest", {"app_dir": "/app", "alloc_bytes": 3 * 1024 ** 3, "node": node_bin()}, paths=[],
+                      timeout=90, scratch_root=jobs.imports_dir() / "tmp")
+    # Node reserves more address space than the 2 GB call limit allows: its calls run with 8 GB.
+    node = sandbox.run("node", {"node": node_bin(), "app_dir": "/app", "mode": "call", "package_dir": "/nonexistent",
+                                "spec": {"function": "x"}, "inputs": {}}, paths=[], timeout=60, memory_mb=8192,
+                       scratch_root=jobs.imports_dir() / "tmp")
+    starts = node.get("code") == "import_failed"  # it started, then (as intended) found no package to load
+    return {"sandbox_mode": sandbox.mode(), "result": res,
+            "node_in_sandbox": "starts" if starts else node.get("reason") or node.get("error")}
 
 
 class PublishRequest(BaseModel):

@@ -1,10 +1,14 @@
 """Import jobs: submission (with dedupe), persistent status, and the background worker pipeline.
 
 Pipeline (one job at a time per API instance, claimed with FOR UPDATE SKIP LOCKED):
-  fetching -> reading_license (recorded for attribution; a license never blocks) -> analyzing ->
-  installing -> discovering (sandbox: find the algorithm, infer schema, real test call) -> registering -> verifying (a real POST /v1/execute
-  with a short-lived key of the customer) -> ready.  Any problem -> failed with a specific code
-  and reason. Only `ready` imports are callable, and only by the customer who submitted them.
+  fetching (the pinned commit, with GitHub submodules) -> reading_license (attribution only; a
+  license never blocks) -> analyzing (detect the runtime and build plan, then apply the saved repo
+  configuration, if any) -> building (dependencies from the lockfile, then an offline build in the
+  sandbox; cached by build key) -> discovering (sandbox: find the operation and a real sample call)
+  -> registering -> verifying (a real POST /v1/execute with a short-lived key of the customer) ->
+  ready. Any problem -> failed with a specific code and reason; when a repo configuration would
+  fix it, the failure lists exactly what is missing plus a configuration template. Only `ready`
+  imports are callable, and only by the customer who submitted them (unless published).
 """
 from __future__ import annotations
 
@@ -25,7 +29,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import jsonschema
 
 from app import accounts, catalog, db, manifests
-from app.imports import github, installer, licensing, packaging, sandbox
+from app.imports import configs, github, installer, licensing, packaging, plan as plans, runtimes, sandbox
 from app.imports.github import ImportFailure
 
 log = logging.getLogger("uvicorn.error")
@@ -41,7 +45,8 @@ FAILURE_CODES = {"invalid_url", "repo_not_found", "ref_not_found", "repo_empty",
                  "no_python_package", "multiple_packages", "unsupported_dependency", "import_failed",
                  "no_callable_function", "multiple_entry_points", "entry_point_not_found", "unsupported_input",
                  "unsupported_output", "test_failed", "verification_failed", "sandbox_unavailable",
-                 "sandbox_crashed", "timeout", "internal_error"}
+                 "sandbox_crashed", "timeout", "internal_error", "needs_configuration", "runtime_not_available",
+                 "build_failed"}
 CONVERT_RE = re.compile(r"^(tuple|set|ndarray|(enum|enumname):[A-Za-z_][\w.]*:[A-Za-z_][\w.]*)$")
 IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,99}$")
 
@@ -65,7 +70,7 @@ def _slug(s: str, limit: int = 40) -> str:
 COLUMNS = ("id, customer_id, repo_url, repo_full_name, commit_sha, entry_point, status, stage, failure_code, "
            "failure_reason, failure_details, operation, manifest, spec, pins, license_spdx, example_response, "
            "created_at, updated_at, ready_at, attempts, published_name, published_summary, published_at, "
-           "published_when_to_use")
+           "published_when_to_use, runtime, build_key, config_hash")
 
 
 def _row(r) -> Dict[str, Any]:
@@ -78,9 +83,16 @@ def public_view(row: Dict[str, Any], base_url: str) -> Dict[str, Any]:
         "id": str(row["id"]), "repo": row["repo_full_name"], "url": row["repo_url"], "commit": row["commit_sha"],
         "status": row["status"], "stage": row["stage"], "entry_point": row["entry_point"],
         "created_at": row["created_at"], "updated_at": row["updated_at"], "ready_at": row["ready_at"]}
+    if row.get("runtime"):
+        out["runtime"] = row["runtime"]
     if row["status"] == "failed":
-        out["failure"] = {"code": row["failure_code"], "reason": row["failure_reason"],
-                          **({"details": row["failure_details"]} if row["failure_details"] else {})}
+        details = dict(row["failure_details"] or {})
+        out["failure"] = {"code": row["failure_code"], "reason": row["failure_reason"]}
+        for key in ("missing", "config_template", "runtime"):  # how to fix it, when a configuration can
+            if key in details:
+                out["failure"][key] = details.pop(key)
+        if details:
+            out["failure"]["details"] = details
     m = row.get("manifest")
     if row["status"] == "ready" and m:
         body = {"tasks": [{"id": "1", "operation": row["operation"], "inputs": m["example"]["inputs"]}]}
@@ -142,7 +154,8 @@ def submit(customer_id: str, url: str, entry_point: Optional[str] = None,
                                 (customer_id, ref.full_name, commit)).fetchone()
         if existing:
             row = _row(existing)
-            if row["status"] == "failed" and (retry or (entry_point and entry_point != row["entry_point"])):
+            new_config = row.get("config_hash") is not None and row["config_hash"] != configs.current_hash(ref.full_name)
+            if row["status"] == "failed" and (retry or new_config or (entry_point and entry_point != row["entry_point"])):
                 fresh = conn.execute(
                     f"UPDATE github_imports SET status = 'queued', stage = 'queued', failure_code = NULL, "
                     f"failure_reason = NULL, failure_details = NULL, operation = NULL, manifest = NULL, spec = NULL, "
@@ -165,6 +178,17 @@ def submit(customer_id: str, url: str, entry_point: Optional[str] = None,
             (uuid.uuid4(), customer_id, ref.url + (f"/tree/{ref.ref}" if ref.ref else ""), ref.full_name, commit,
              entry_point)).fetchone()
     return _row(row), True
+
+
+def requeue_failed(repo_full_name: str) -> List[str]:
+    """After a repo configuration is saved: retry that repo's failed imports (any customer) with it."""
+    with db.pool().connection() as conn:
+        rows = conn.execute(
+            "UPDATE github_imports SET status = 'queued', stage = 'queued', failure_code = NULL, failure_reason = NULL, "
+            "failure_details = NULL, operation = NULL, manifest = NULL, spec = NULL, attempts = 0, claimed_by = NULL, "
+            "updated_at = now() WHERE lower(repo_full_name) = lower(%s) AND status = 'failed' RETURNING id",
+            (repo_full_name,)).fetchall()
+    return [str(r[0]) for r in rows]
 
 
 def list_for(customer_id: str, limit: int = 100) -> List[Dict[str, Any]]:
@@ -292,7 +316,7 @@ def refresh_attribution(import_id: uuid.UUID) -> Optional[Dict[str, Any]]:
 # -- worker -------------------------------------------------------------------------------------------
 def _update(import_id, **fields) -> None:
     sets = ", ".join(f"{k} = %s" for k in fields) + ", updated_at = now()"
-    vals = [json.dumps(v) if k in ("failure_details", "manifest", "spec", "pins", "example_response") and v is not None
+    vals = [json.dumps(v) if k in ("failure_details", "manifest", "spec", "pins", "example_response", "plan") and v is not None
             else v for k, v in fields.items()]
     with db.pool().connection() as conn:
         conn.execute(f"UPDATE github_imports SET {sets} WHERE id = %s", (*vals, import_id))
@@ -360,20 +384,24 @@ def _operation_name(customer_id: str, import_id, repo: str, function: str, commi
     return name if name not in taken else f"{base}_{uuid.uuid4().hex[:6]}"
 
 
-def _manifest(name: str, row: Dict[str, Any], info: packaging.PackageInfo, res: Dict[str, Any],
+def _manifest(name: str, row: Dict[str, Any], plan: Dict[str, Any], res: Dict[str, Any],
               spdx: str, copyright_lines: List[str], has_license_file: bool = True) -> Dict[str, Any]:
     fn, repo = res["function"], row["repo_full_name"]
-    summary = (res.get("summary") or info.description or f"Run {fn} from {repo}").strip()
+    summary = (res.get("summary") or f"Run {fn} from {repo}").strip()
     summary = (summary if len(summary) >= 10 else f"{summary} ({fn} from {repo})")[:300]
-    words = fn.replace("_", " ")
-    intents = list(dict.fromkeys(x for x in [summary.rstrip("."), (info.description or "").rstrip("."), words,
-                                             f"run {words}", f"{repo.split('/')[1]} {words}"] if x and len(x) >= 3))
+    words = re.sub(r"[_.-]+", " ", fn)
+    intents = list(dict.fromkeys(x for x in [summary.rstrip("."), words, f"run {words}",
+                                             f"{repo.split('/')[1]} {words}"] if x and len(x) >= 3))
+    while len(intents) < 3:
+        intents.append(f"use {repo.split('/')[1]} {len(intents)}")
     sample = res["sample_inputs"]
-    return {
+    t = res.get("timeout") or ({"default": 300, "max": 3600} if res.get("long_running") else
+                               {"default": CALL_DEFAULT_TIMEOUT, "max": CALL_MAX_TIMEOUT})
+    m = {
         "name": name, "summary": summary, "intents": intents[:12],
         "clarify": f"What inputs should I pass to {fn}? Send data like {json.dumps(sample)[:200]}."[:300],
-        "runtime": {"kind": "sandbox", "internal": f"{res['module']}:{fn}", "import_id": str(row["id"])},
-        "timeouts": {"default": CALL_DEFAULT_TIMEOUT, "max": CALL_MAX_TIMEOUT},
+        "runtime": {"kind": "sandbox", "internal": f"{plan['runtime']}:{fn}", "import_id": str(row["id"])},
+        "timeouts": {"default": min(t["default"], t["max"]), "max": t["max"]},
         "input_schema": res["input_schema"],
         "example": {"request": summary.rstrip("."), "data": sample, "inputs": sample, "output": res["sample_output"]},
         "built_on": {"project": repo, "license": spdx,
@@ -383,6 +411,28 @@ def _manifest(name: str, row: Dict[str, Any], info: packaging.PackageInfo, res: 
                      "dependency": {"manager": "github", "name": repo, "version": row["commit_sha"][:12],
                                     "commit": row["commit_sha"]}},
     }
+    if res.get("long_running"):
+        m["long_running"] = True
+    return m
+
+
+def _check_result(res: Dict[str, Any], build: Dict[str, Any]) -> None:
+    """Everything discovery returned came from the sandbox: check its shape before trusting it."""
+    spec = res.get("spec") or {}
+    if spec.get("kind") == "function":
+        _validate_discovery(res["_raw"], build["module"])
+    if not isinstance(res.get("function"), str) or not re.fullmatch(r"[A-Za-z0-9_.$@/+-]{1,100}", res["function"]):
+        raise ImportFailure("internal_error", "The analysis returned an invalid operation name.")
+    try:
+        jsonschema.Draft202012Validator.check_schema(res.get("input_schema"))
+        jsonschema.validate(res.get("sample_inputs"), res["input_schema"])
+    except (jsonschema.SchemaError, jsonschema.ValidationError) as exc:
+        raise ImportFailure("internal_error", f"The inferred schema is invalid: {exc.message}") from None
+    if not isinstance(res.get("sample_output"), dict):
+        raise ImportFailure("internal_error", "The analysis returned no sample output.")
+    for key, limit in (("input_schema", 64_000), ("sample_inputs", 256_000), ("sample_output", 256_000)):
+        if len(json.dumps(res.get(key))) > limit:
+            raise ImportFailure("unsupported_output", f"The {key.replace('_', ' ')} is too large to publish.")
 
 
 def _http_verify(customer_id: str, import_id: str, operation: str, inputs: dict) -> Tuple[int, dict]:
@@ -391,7 +441,7 @@ def _http_verify(customer_id: str, import_id: str, operation: str, inputs: dict)
     base = os.environ.get("COGNEX_SELF_URL") or f"http://127.0.0.1:{os.environ.get('PORT', '8000')}"
     try:
         req = urllib.request.Request(f"{base}/v1/execute", method="POST", data=json.dumps(
-            {"tasks": [{"id": "import-check", "operation": operation, "inputs": inputs}]}).encode(),
+            {"tasks": [{"id": "import-check", "operation": operation, "inputs": inputs, "async": False}]}).encode(),
             headers={"Content-Type": "application/json", "X-API-Key": key["secret"]})
         try:
             with urllib.request.urlopen(req, timeout=CALL_MAX_TIMEOUT + 60) as r:  # noqa: S310 (own server)
@@ -408,37 +458,39 @@ VERIFY: Callable[[str, str, str, dict], Tuple[int, dict]] = _http_verify  # test
 def process(row: Dict[str, Any]) -> None:
     import_id = row["id"]
     work = imports_dir() / str(import_id)
-    src, site = work / "src", work / "site"
+    src = work / "src"
     try:
         ref = github.parse_url(row["repo_url"])
         _update(import_id, stage="fetching")
         FETCH(ref, row["commit_sha"], src)
         _update(import_id, stage="reading_license")  # recorded for attribution; never accepts or rejects
         files = licensing.license_files(src)
-        _update(import_id, stage="analyzing")
-        info = packaging.analyze(src, ref.repo)
-        spdx, lic, holders = licensing.attribution(files, src, info.root / info.module)
+        spdx, lic, holders = licensing.attribution(files, src)
         if lic is not None:
             shutil.copyfile(src / lic["file"], work / "LICENSE")
-        _update(import_id, license_spdx=spdx, license_text=lic["text"][:200_000] if lic else None)
-        _update(import_id, stage="installing")
-        pins = installer.install(info.dependencies, site)
-        _update(import_id, stage="discovering", pins=pins)
-        res = sandbox.run("discover", {"module": info.module, "repo_name": ref.repo, "readme": info.readme,
-                                       "entry_point": row["entry_point"]},
-                          paths=[str(info.root), str(site)], timeout=DISCOVER_TIMEOUT, scratch_root=work.parent / "tmp")
-        if not res.get("ok"):
-            raise ImportFailure(str(res.get("code") or "internal_error"), str(res.get("reason") or res.get("error")),
-                                **({"candidates": res["candidates"][:10]} if isinstance(res.get("candidates"), list) else {}))
-        _validate_discovery(res, info.module)
+        _update(import_id, stage="analyzing", license_spdx=spdx, license_text=lic["text"][:200_000] if lic else None)
+        config = configs.get(ref.full_name)
+        _update(import_id, config_hash=plans.config_hash(config))
+        plan = plans.detect(src, ref.repo, config)
+        plan["repo_name"] = ref.repo
+        if plan["runtime"] == "python" and not plan.get("version"):
+            plan["version_hint"] = github.version_hint(ref, row["commit_sha"])
+        _update(import_id, runtime=plan["runtime"], plan=plan)
+        if plan["runtime"] not in plans.AVAILABLE:
+            raise plans.unavailable(plan)
+        _update(import_id, stage="building")
+        key, build, reused = runtimes.build(src, plan, row["commit_sha"])
+        log.info("import %s: %s build %s (%s)", import_id, plan["runtime"], key[:12], "reused" if reused else "built")
+        _update(import_id, stage="discovering", build_key=key, pins=build.get("pins") or [])
+        res = runtimes.discover(plan, build, row["entry_point"])
+        _check_result(res, build)
         _update(import_id, stage="registering")
-        name = _operation_name(row["customer_id"], import_id, ref.repo, res["function"], row["commit_sha"])
-        manifest = _manifest(name, row, info, res, spdx, holders, has_license_file=lic is not None)
+        name_hint = (plan.get("operation") or {}).get("name") or res["function"]
+        name = _operation_name(row["customer_id"], import_id, ref.repo, name_hint, row["commit_sha"])
+        manifest = _manifest(name, row, plan, res, spdx, holders, has_license_file=lic is not None)
         manifests.parse(manifest)  # same format checks as built-in operations
-        spec = {"module": info.module, "function": res["function"], "params": res["params"],
-                "root": str(info.root.relative_to(src)).replace("\\", "/") if info.root != src else "",
-                "signature": res.get("signature")}
-        (work / "ready.json").write_text(json.dumps({"commit": row["commit_sha"], "pins": pins}))
+        spec = {**res["spec"], "build_key": key, "runtime": plan["runtime"],
+                "build_dir": str(runtimes.builds_dir() / key), "signature": res.get("signature")}
         _update(import_id, stage="verifying", operation=name, manifest=manifest, spec=spec)
         status, body = VERIFY(row["customer_id"], str(import_id), name, res["sample_inputs"])
         result = (body.get("results") or [{}])[0] if isinstance(body, dict) else {}
@@ -452,6 +504,7 @@ def process(row: Dict[str, Any]) -> None:
                          "IS NOT NULL THEN now() END WHERE id = %s", (import_id,))
         from app.imports import private
         private.invalidate()
+        shutil.rmtree(src, ignore_errors=True)  # the build keeps its own copy
         log.info("import %s ready as %s", import_id, name)
     except ImportFailure as exc:
         log.info("import %s failed: %s", import_id, exc.code)

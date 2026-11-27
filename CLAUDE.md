@@ -20,9 +20,20 @@ is Ready, private to that customer.
 
 - `app/imports/` holds the pipeline:
   - `jobs.py`: queue, worker, stages, failure codes
+  - `plan.py`: detection → build plan; the repo-configuration format (`CONFIG_SCHEMA`) is the same plan
+  - `runtimes.py`: one section per runtime (python, node, native, frontend): fetch, offline build,
+    discover, call. Plus the build cache (key = commit + plan + lockfile + toolchain).
+    container and conda are detected but have no runtime yet (`runtime_not_available`).
+  - `configs.py`: saved repo configurations (`/v1/admin/repo-configs/{owner}/{repo}`)
   - `github.py`, `licensing.py`, `packaging.py`, `installer.py`: trusted steps that never run repo code
-  - `sandbox.py` + `sandbox_boot.py` + `runner.py`: isolated execution
+  - `sandbox.py` + `sandbox_boot.py` + `runner.py` + `node_runner.mjs`: isolated execution
   - `private.py`: per-customer capabilities
+- **A new repo is a configuration change; new backend code is only for a new runtime type.**
+  When detection can't settle something, the failure lists `missing` fields and gives a
+  `config_template`. Save the filled-in template with PUT, and that repo's failed imports re-run.
+- Long-running operations (`long_running` in the manifest or operation config, or a task with
+  `"async": true`) return `status: "queued"` + `job_id`; results come from `GET /v1/jobs/{id}`
+  (`app/async_jobs.py`).
 - The endpoints live in `app/imports_api.py`.
 - **Untrusted code runs only in the sandbox:** a random unprivileged uid, an empty environment,
   seccomp blocking network sockets, and resource limits. Strict mode needs Linux and root, which

@@ -1,0 +1,2 @@
+{"name": "nodeslug", "version": "1.0.0", "description": "Slugify a string.", "type": "module",
+ "exports": "./index.js", "license": "MIT"}

@@ -5,7 +5,9 @@ Self-contained (stdlib only) and runs the lockdown BEFORE any untrusted code is 
   2. drop root to a random unprivileged uid/gid with no supplementary groups
   3. PR_SET_DUMPABLE=0 (no /proc peeking or ptrace by other processes), PR_SET_NO_NEW_PRIVS=1
   4. seccomp filter (x86-64): sockets other than AF_UNIX, ptrace, process_vm_*, bpf, io_uring,
-     namespaces/mount, keyctl, perf, userfaultfd are refused; foreign syscall ABIs kill the process
+     namespaces/mount, keyctl, perf, userfaultfd are refused; foreign syscall ABIs kill the process.
+     Only the "fetch" step (package managers downloading dependencies, with install scripts
+     disabled, so no repo code runs) is started with network=True, which permits sockets.
 Then the trusted runner is imported, the untrusted import paths are added, and the mode runs.
 The environment arrives empty (no secrets); the parent enforces wall-clock timeouts.
 The result is written as one JSON line to the original stdout; fd 1 is redirected to stderr so
@@ -19,7 +21,7 @@ import struct
 import sys
 
 
-def _seccomp_filter() -> bytes:
+def _seccomp_filter(network: bool = False) -> bytes:
     LD_W_ABS, JEQ_K, JGE_K, RET_K = 0x20, 0x15, 0x35, 0x06
     ALLOW, KILL = 0x7FFF0000, 0x80000000
     ERRNO = lambda e: 0x00050000 | e  # noqa: E731
@@ -46,7 +48,8 @@ def _seccomp_filter() -> bytes:
     prog.append(("jge", 0x40000000, "kill", "next"))  # x32 ABI
     for nr in deny:
         prog.append(("jeq", nr, "deny", "next"))
-    prog.append(("jeq", SYS_SOCKET, "sock", "next"))
+    if not network:  # dependency fetching (no repo code runs) is the only mode with network access
+        prog.append(("jeq", SYS_SOCKET, "sock", "next"))
     prog.append(("ret", ALLOW))
     labels = {}
     prog.append(("label", "kill"))
@@ -100,7 +103,7 @@ def _lockdown(cfg: dict) -> None:
         raise OSError(ctypes.get_errno(), "PR_SET_DUMPABLE")
     if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
         raise OSError(ctypes.get_errno(), "PR_SET_NO_NEW_PRIVS")
-    filt = _seccomp_filter()
+    filt = _seccomp_filter(bool(cfg.get("network")))
     buf = ctypes.create_string_buffer(filt, len(filt))
 
     class SockFprog(ctypes.Structure):

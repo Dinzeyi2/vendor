@@ -284,6 +284,41 @@ V9_PUBLISHED_WHEN_TO_USE = """
 ALTER TABLE github_imports ADD COLUMN published_when_to_use TEXT;
 """
 
+V10_GENERAL_IMPORTER = """
+-- Saved repo configurations (operator): fill in what detection can't settle; reused by every
+-- later import of the repo, by any customer.
+CREATE TABLE repo_configs (
+    repo        TEXT PRIMARY KEY,                -- lower-case OWNER/REPO
+    config      JSONB NOT NULL,
+    config_hash TEXT NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE github_imports ADD COLUMN runtime TEXT;
+ALTER TABLE github_imports ADD COLUMN plan JSONB;
+ALTER TABLE github_imports ADD COLUMN build_key TEXT;
+ALTER TABLE github_imports ADD COLUMN config_hash TEXT;
+
+-- Long-running operations: POST /v1/execute answers with a job id; GET /v1/jobs/{id} has the result.
+-- Inputs are never stored; results are kept for a day.
+CREATE TABLE execution_jobs (
+    id              UUID PRIMARY KEY,
+    customer_id     TEXT,                        -- NULL for the operator key
+    key_id          UUID,
+    operation       TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'ok', 'error')),
+    output          JSONB,
+    error_type      TEXT,
+    error           TEXT,
+    credits_charged INTEGER NOT NULL DEFAULT 0,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    started_at      TIMESTAMPTZ,
+    finished_at     TIMESTAMPTZ,
+    expires_at      TIMESTAMPTZ NOT NULL DEFAULT now() + interval '1 day'
+);
+CREATE INDEX execution_jobs_customer ON execution_jobs (customer_id, created_at DESC);
+"""
+
 MIGRATIONS: List[Tuple[int, str, str]] = [
     (1, "accounts_keys_usage", V1_ACCOUNTS_KEYS_USAGE),
     (2, "prepaid_credits", V2_PREPAID_CREDITS),
@@ -294,6 +329,7 @@ MIGRATIONS: List[Tuple[int, str, str]] = [
     (7, "github_imports", V7_GITHUB_IMPORTS),
     (8, "published_imports", V8_PUBLISHED_IMPORTS),
     (9, "published_when_to_use", V9_PUBLISHED_WHEN_TO_USE),
+    (10, "general_importer", V10_GENERAL_IMPORTER),
 ]
 
 

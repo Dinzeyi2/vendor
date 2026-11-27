@@ -1,4 +1,5 @@
-# Unified Algorithm API: Python 3.12 + JDK 17 (Timefold) + Node (Rapier) + Julia (PySR).
+# Unified Algorithm API: Python 3.12 + JDK 17 (Timefold) + Node 22 (Rapier, imports) + Julia (PySR),
+# plus the C/C++ toolchain and CMake that GitHub imports build with (in the sandbox, offline).
 FROM python:3.12-slim-bookworm
 
 ENV PYTHONUNBUFFERED=1 \
@@ -10,20 +11,31 @@ ENV PYTHONUNBUFFERED=1 \
     # Precompile Julia code for generic x86-64 so the image runs on any host CPU.
     JULIA_CPU_TARGET="generic;sandybridge,-xsaveopt,clone_all;haswell,-rdrnd,base(1)"
 
-# openjdk-17-jre-headless: Timefold's JVM. nodejs: Rapier worker. build-essential: hnswlib.
+# openjdk-17-jre-headless: Timefold's JVM. build-essential: hnswlib, and C/C++ imports.
+# cmake/autoconf/automake/libtool/pkg-config + common -dev headers: native GitHub imports.
 # libgl1/libglib2.0-0/libgomp1: OpenCV and PaddlePaddle native deps.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        openjdk-17-jre-headless nodejs npm build-essential \
-        libgl1 libglib2.0-0 libgomp1 ca-certificates \
+        openjdk-17-jre-headless build-essential cmake ninja-build pkg-config autoconf automake libtool \
+        zlib1g-dev libbz2-dev liblzma-dev libffi-dev \
+        libgl1 libglib2.0-0 libgomp1 ca-certificates curl xz-utils \
     && rm -rf /var/lib/apt/lists/*
+
+# Node.js 22 (official build: npm + corepack for yarn/pnpm, and C headers so native addons of
+# imported packages build offline). Verified against the release's published SHA-256 sums.
+ARG NODE_VERSION=22.11.0
+RUN cd /tmp && curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
+    && curl -fsSLO "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" \
+    && grep " node-v${NODE_VERSION}-linux-x64.tar.xz\$" SHASUMS256.txt | sha256sum -c - \
+    && tar -xJf "node-v${NODE_VERSION}-linux-x64.tar.xz" -C /usr/local --strip-components=1 --no-same-owner \
+    && rm -f "node-v${NODE_VERSION}-linux-x64.tar.xz" SHASUMS256.txt \
+    && node --version && npm --version
 
 WORKDIR /app
 
 # CPU-only PyTorch (the default Linux wheel bundles CUDA and is several GB larger).
 COPY requirements.txt .
 RUN pip install --index-url https://download.pytorch.org/whl/cpu torch==2.15.0 \
-    && pip install -r requirements.txt \
-    && apt-get purge -y build-essential && apt-get autoremove -y
+    && pip install -r requirements.txt
 
 COPY workers/rapier/package.json workers/rapier/package-lock.json workers/rapier/
 RUN cd workers/rapier && npm ci --omit=dev

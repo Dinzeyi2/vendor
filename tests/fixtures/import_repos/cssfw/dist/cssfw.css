@@ -1,0 +1,2 @@
+:root{--cssfw-accent:#3355ff}
+.btn{padding:.5rem 1rem;border-radius:4px;background:var(--cssfw-accent);color:#fff}

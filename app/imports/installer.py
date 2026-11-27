@@ -63,7 +63,8 @@ def _explain(stderr: str) -> str:
     m = re.search(r"No matching distribution found for ([^\s]+)", stderr)
     if m:
         return (f"Dependency '{m.group(1)}' has no prebuilt package (wheel) for Linux / Python "
-                f"{sys.version_info.major}.{sys.version_info.minor}; Cognex doesn't build packages from source.")
+                f"{sys.version_info.major}.{sys.version_info.minor}. Dependencies are installed as prebuilt "
+                f"wheels; pin a version that has one in the repo configuration (extra_requirements).")
     m = re.search(r"ResolutionImpossible|conflicting dependencies", stderr)
     if m:
         return "The dependencies conflict with each other and can't be installed together."
@@ -71,10 +72,10 @@ def _explain(stderr: str) -> str:
     return f"The dependencies couldn't be installed: {tail}"
 
 
-def install(requirements: List[str], site: Path, timeout: float = 300) -> List[str]:
+def install(requirements: List[str], site: Path, timeout: float = 300, skip_satisfied: bool = True) -> List[str]:
     """Install what's missing into `site`; returns exact pins (name==version) of what was installed."""
     site.mkdir(parents=True, exist_ok=True)
-    needed = [r for r in requirements if not _satisfied(r)]
+    needed = [r for r in requirements if not (skip_satisfied and _satisfied(r))]
     if not needed:
         return []
     with tempfile.TemporaryDirectory() as tmp:
@@ -95,6 +96,15 @@ def install(requirements: List[str], site: Path, timeout: float = 300) -> List[s
         raise ImportFailure("unsupported_dependency",
                             f"The dependencies are larger than {MAX_SITE_BYTES // (1024 * 1024)} MB.")
     return sorted(pins)
+
+
+def install_wheel(wheel: Path, site: Path, timeout: float = 300) -> None:
+    """Install one wheel Cognex built (in the sandbox) into `site`: unpacking a wheel runs no code."""
+    proc = _pip(["install", "--target", str(site), "--no-deps", "--no-index", "--no-warn-script-location",
+                 "--upgrade", str(wheel)], timeout)
+    if proc.returncode != 0:
+        raise ImportFailure("build_failed", "The built package couldn't be installed: "
+                            + " ".join(proc.stderr.strip().splitlines()[-2:])[:300])
 
 
 def reinstall(pins: List[str], site: Path, timeout: float = 300) -> None:

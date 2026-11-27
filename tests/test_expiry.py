@@ -377,7 +377,7 @@ def test_migration_preserves_balances_and_report_explains_legacy_grants(pg, monk
                              "VALUES (%s, %s, %s, now() - make_interval(days => %s))", (pid, cust, credits_, days))
         migrations.MIGRATIONS = full
         with psycopg.connect(url) as conn:
-            assert migrations.migrate(conn) == [4, 5, 6, 7, 8, 9]
+            assert migrations.migrate(conn) == [4, 5, 6, 7, 8, 9, 10]
             assert conn.execute("SELECT source, expires_at, remaining FROM credit_lots").fetchall() == [("legacy", None, 120)]
             assert conn.execute("SELECT grant_type, purchased_at, expires_at FROM credit_grants WHERE payment_id = 'cs_old'"
                                 ).fetchone() == ("paid", None, None)                           # terms unchanged
