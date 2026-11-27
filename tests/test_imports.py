@@ -210,10 +210,62 @@ def test_import_check_keys_are_scoped_unbilled_and_unlisted():
     assert [x["name"] for x in client.get("/v1/account/keys", headers=site(c)).json()["keys"]] == ["app"]
 
 
+# -- licenses never block: recorded for attribution only ---------------------------------------------
+def test_agpl_repo_is_no_longer_blocked_and_reaches_the_build_step(monkeypatch):
+    stages = []
+    real_update = jobs._update
+    def record(import_id, **fields):
+        if "stage" in fields:
+            stages.append(fields["stage"])
+        return real_update(import_id, **fields)
+    monkeypatch.setattr(jobs, "_update", record)
+    c = new_customer()
+    key = key_for(c, credits=2)
+    import_id = submit(c, "agpl").json()["id"]
+    run_worker()
+    imp = status_of(c, import_id)
+    assert stages == ["fetching", "reading_license", "analyzing", "installing", "discovering", "registering",
+                      "verifying", "ready"], stages            # past the license, through the build step
+    assert imp["status"] == "ready" and "failure" not in imp, imp
+    assert imp["license"]["spdx"] == "AGPL-3.0"                # attribution kept
+    assert "Cognex Test Fixtures (AGPL fixture)" in imp["license"]["copyright"]
+    assert (jobs.imports_dir() / import_id / "LICENSE").read_text().startswith(" " * 20 + "GNU AFFERO")
+    res = execute(key, [{"id": "1", "operation": "agpl.agpl", "inputs": {"x": 3, "y": 4}}]).json()["results"][0]
+    assert res["status"] == "ok" and res["output"] == {"result": 13}
+
+
+def test_repo_without_a_license_file_imports_and_publishes():
+    c = new_customer()
+    key = key_for(c, credits=1)
+    import_id = submit(c, "nolicense").json()["id"]
+    run_worker()
+    imp = status_of(c, import_id)
+    assert imp["status"] == "ready" and imp["license"]["spdx"] == "NOASSERTION", imp
+    assert execute(key, [{"id": "1", "operation": "nolicense.nolicense", "inputs": {"x": 2, "y": 5}}]).json()[
+        "results"][0]["output"] == {"result": 11}
+    # the operator can publish AGPL and unlicensed repos for every customer; attribution is listed as found
+    for repo, spdx in (("agpl", "AGPL-3.0"), ("nolicense", "NOASSERTION")):
+        name = f"math.score_{repo}_{uuid.uuid4().hex[:6]}"
+        r = admin("POST", "/v1/admin/imports", json={"url": f"https://github.com/cognex-fixtures/{repo}",
+                                                     "publish": {"name": name}})
+        assert r.status_code in (200, 202), r.text
+        run_worker()
+        assert admin("GET", f"/v1/admin/imports/{r.json()['id']}").json()["published"]["live"]
+        assert any(p["operation"] == name and p["license"] == spdx
+                   for p in client.get("/v1/open-source").json()["projects"])
+        admin("POST", f"/v1/admin/imports/{r.json()['id']}/unpublish")
+
+
+def test_no_license_failure_codes_or_checks_remain():
+    assert not {c for c in jobs.FAILURE_CODES if "licen" in c}
+    from app.imports import licensing
+    assert not hasattr(licensing, "verdict")
+    assert all(len(entry) == 2 for entry in licensing.LICENSES)   # SPDX id + phrase: no allow/deny flag
+
+
 # -- failures: a specific reason, never callable ---------------------------------------------------------
 @pytest.mark.parametrize("repo, code, words", [
     ("ambiguous", "multiple_entry_points", "mean_of(), median_of()"),
-    ("gpl", "license_not_permissive", "GPL"),
     ("compiled", "unsupported_build", "compiled/_fast.c"),
     ("failing", "test_failed", "documentation says 3"),
     ("noreturn", "unsupported_output", "returned nothing"),

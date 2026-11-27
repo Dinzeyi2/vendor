@@ -1,7 +1,8 @@
 """License detection for repositories (shared by customer imports and operator onboarding).
 
-Text heuristics on the repo's own license files. Only clearly permissive licenses pass; copyleft,
-source-available, non-commercial, unknown or missing licenses are refused with a reason.
+Text heuristics on the repo's own license files, used only to record attribution (the SPDX id,
+copyright lines and license text shown on the open-source page). Nothing here accepts or rejects
+a repository: its license never blocks import, testing or publishing.
 """
 from __future__ import annotations
 
@@ -9,32 +10,32 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-LICENSES: List[Tuple[str, bool, str]] = [  # (spdx, permissive?, distinctive phrase) - most specific first
-    ("AGPL-3.0", False, "GNU AFFERO GENERAL PUBLIC LICENSE"),
-    ("LGPL", False, "GNU LESSER GENERAL PUBLIC LICENSE"),
-    ("GPL", False, "GNU GENERAL PUBLIC LICENSE"),
-    ("SSPL", False, "Server Side Public License"),
-    ("BUSL", False, "Business Source License"),
-    ("CC-BY-NC", False, "NonCommercial"),
-    ("EUPL", False, "European Union Public Licen"),
-    ("MPL-2.0", True, "Mozilla Public License"),
-    ("Apache-2.0", True, "Apache License"),
-    ("MIT", True, "Permission is hereby granted, free of charge"),
-    ("BSD-3-Clause", True, "Neither the name"),
-    ("BSD-2-Clause", True, "Redistributions in binary form must reproduce"),
-    ("ISC", True, "Permission to use, copy, modify, and/or distribute this software"),
-    ("Unlicense", True, "This is free and unencumbered software"),
-    ("Zlib", True, "This software is provided 'as-is'"),
-    ("PSF-2.0", True, "PYTHON SOFTWARE FOUNDATION LICENSE"),
+LICENSES: List[Tuple[str, str]] = [  # (spdx, distinctive phrase) - most specific first; for attribution
+    ("AGPL-3.0", "GNU AFFERO GENERAL PUBLIC LICENSE"),
+    ("LGPL", "GNU LESSER GENERAL PUBLIC LICENSE"),
+    ("GPL", "GNU GENERAL PUBLIC LICENSE"),
+    ("SSPL", "Server Side Public License"),
+    ("BUSL", "Business Source License"),
+    ("CC-BY-NC", "NonCommercial"),
+    ("EUPL", "European Union Public Licen"),
+    ("MPL-2.0", "Mozilla Public License"),
+    ("Apache-2.0", "Apache License"),
+    ("MIT", "Permission is hereby granted, free of charge"),
+    ("BSD-3-Clause", "Neither the name"),
+    ("BSD-2-Clause", "Redistributions in binary form must reproduce"),
+    ("ISC", "Permission to use, copy, modify, and/or distribute this software"),
+    ("Unlicense", "This is free and unencumbered software"),
+    ("Zlib", "This software is provided 'as-is'"),
+    ("PSF-2.0", "PYTHON SOFTWARE FOUNDATION LICENSE"),
 ]
 LICENSE_FILE_RE = re.compile(r"(?i)^(licen[cs]e|copying|notice|copyright)([.-].*)?$")
 
 
-def classify(text: str) -> Tuple[str, bool]:
-    for spdx, permissive, phrase in LICENSES:
+def classify(text: str) -> str:
+    for spdx, phrase in LICENSES:
         if phrase.lower() in text.lower():
-            return spdx, permissive
-    return "unknown", False
+            return spdx
+    return "unknown"
 
 
 def copyright_lines(text: str) -> List[str]:
@@ -52,22 +53,18 @@ def license_files(repo: Path) -> List[Dict]:
         if p.is_file() and LICENSE_FILE_RE.match(p.name) and p.stat().st_size < 512_000:
             text = p.read_text(encoding="utf-8", errors="replace")
             notice = p.name.upper().startswith("NOTICE")
-            spdx, permissive = ("NOTICE", True) if notice else classify(text)
-            found.append({"file": p.name, "spdx_guess": spdx, "permissive": permissive,
+            spdx = "NOTICE" if notice else classify(text)
+            found.append({"file": p.name, "spdx_guess": spdx,
                           "copyright_lines": copyright_lines(text), "bytes": p.stat().st_size, "text": text})
     return found
 
 
-def verdict(files: List[Dict]) -> Tuple[bool, Optional[str], Optional[str]]:
-    """(ok, spdx, reason-if-refused) for a repo's license files."""
+def attribution(files: List[Dict]) -> Tuple[str, Optional[Dict]]:
+    """(SPDX id or NOASSERTION, the license file or None), recorded for attribution only.
+
+    A repository's license never blocks importing, testing or publishing it."""
     licenses = [f for f in files if f["spdx_guess"] != "NOTICE"]
     if not licenses:
-        return False, None, ("The repository has no license file, so it can't be used without the "
-                             "owner's permission. Add a permissive license (e.g. MIT or Apache-2.0).")
-    bad = [f for f in licenses if not f["permissive"]]
-    if bad:
-        f = bad[0]
-        kind = "an unrecognized license" if f["spdx_guess"] == "unknown" else f"{f['spdx_guess']}"
-        return False, f["spdx_guess"], (f"{f['file']} is {kind}. Cognex only imports permissively licensed "
-                                         f"code (MIT, BSD, Apache-2.0, ISC, MPL-2.0, Unlicense, Zlib, PSF).")
-    return True, licenses[0]["spdx_guess"], None
+        return "NOASSERTION", None
+    f = licenses[0]
+    return (f["spdx_guess"] if f["spdx_guess"] != "unknown" else "NOASSERTION"), f

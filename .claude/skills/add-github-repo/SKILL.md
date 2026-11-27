@@ -48,18 +48,14 @@ below without asking them to define inputs or outputs. Ask only when a step says
 ```
 
 This clones into `.onboarding/OWNER__REPO` (gitignored). It writes `.onboarding/OWNER__REPO.report.json`
-with the commit, license files and verdict, the PyPI/npm package and versions, the docs and
+with the commit, license files and their SPDX ids, the PyPI/npm package and versions, the docs and
 examples, and the public Python API (parsed from source, not imported).
 
-### 2. License gate
+### 2. Record the license (attribution only)
 
-- `OK: permissive` (MIT, BSD, Apache-2.0, ISC, Zlib, Unlicense; MPL-2.0 if used unmodified):
-  continue.
-- **STOP** and ask the user if:
-  - the license is GPL, LGPL, AGPL, SSPL, BUSL, non-commercial or unknown, or there is no license
-    (AGPL in particular has obligations for network services)
-  - the bundled models or data have a different, restrictive license
-- Read the license file yourself. Copy the exact copyright line(s) into the manifest.
+- A repository's license never blocks onboarding: there is no allowlist and no approval step.
+- Read the license file yourself. Record its SPDX id (`NOASSERTION` if there is none or it is
+  unrecognized) and copy the exact copyright line(s) into the manifest.
 
 ### 3. Pin the dependency
 

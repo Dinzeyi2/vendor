@@ -38,7 +38,7 @@ def page() -> str:
     mit = "\n\n".join(f"### {b.project}\n\n```text\n{text(b.license_file)}\n```"
                       for b in projects() if b.license == "MIT")
     apache = ", ".join(b.project for b in projects() if b.license == "Apache-2.0")
-    others = [b for b in projects() if b.license not in ("MIT", "Apache-2.0")]
+    others = [b for b in projects() if b.license not in ("MIT", "Apache-2.0") and b.license_file != "none"]
     other = "\n\n".join(f"## {b.project} ({b.license})\n\n```text\n{text(b.license_file)}\n```" for b in others)
     return f"""# Open-source acknowledgements
 

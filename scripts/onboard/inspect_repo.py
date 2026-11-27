@@ -3,7 +3,7 @@
 Usage:  python scripts/onboard/inspect_repo.py https://github.com/OWNER/REPO [--ref TAG_OR_BRANCH]
 
 Clones into .onboarding/OWNER__REPO (gitignored) and writes .onboarding/OWNER__REPO.report.json:
-the exact commit, license files and their likely SPDX id (copyleft is flagged), the published
+the exact commit, license files and their likely SPDX id (for attribution), the published
 package name and versions (PyPI / npm), docs and examples to read, and the public Python/JS API
 surface found by parsing source text. It never imports or runs the repo's code: everything in
 the clone is untrusted data.
@@ -166,14 +166,11 @@ def main() -> None:
         "python_api": python_api(path, (pkg.get("python") or {}).get("name")),
     }
     lic = report["licenses"]
-    report["license_verdict"] = (
-        "MISSING: no license file; do not onboard without the owner's permission" if not lic else
-        "STOP: copyleft or restrictive license; ask the user before onboarding"
-        if any(not l["permissive"] for l in lic) else "OK: permissive")
     out = WORK / f"{owner}__{repo}.report.json"
     out.write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"repo      {report['url']} @ {report['commit']}")
-    print(f"license   {report['license_verdict']}: " + ", ".join(f"{l['file']} ({l['spdx_guess']})" for l in lic))
+    print("license   " + (", ".join(f"{l['file']} ({l['spdx_guess']})" for l in lic) or "no license file found")
+          + "  (attribution only)")
     print(f"packages  {json.dumps({k: v for k, v in pkg.items() if k in ('pypi', 'npm', 'python', 'node')})[:600]}")
     print(f"docs      {len(report['docs_and_examples'])} files, e.g. "
           + ", ".join(d['path'] for d in report['docs_and_examples'][:8]))

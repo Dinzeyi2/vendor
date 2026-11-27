@@ -1,8 +1,8 @@
 """Import jobs: submission (with dedupe), persistent status, and the background worker pipeline.
 
 Pipeline (one job at a time per API instance, claimed with FOR UPDATE SKIP LOCKED):
-  fetching -> checking_license -> analyzing -> installing -> discovering (sandbox: find the
-  algorithm, infer schema, real test call) -> registering -> verifying (a real POST /v1/execute
+  fetching -> reading_license (recorded for attribution; a license never blocks) -> analyzing ->
+  installing -> discovering (sandbox: find the algorithm, infer schema, real test call) -> registering -> verifying (a real POST /v1/execute
   with a short-lived key of the customer) -> ready.  Any problem -> failed with a specific code
   and reason. Only `ready` imports are callable, and only by the customer who submitted them.
 """
@@ -37,7 +37,7 @@ MAX_ATTEMPTS = 3
 DISCOVER_TIMEOUT = 180
 CALL_DEFAULT_TIMEOUT, CALL_MAX_TIMEOUT = 30, 120
 FAILURE_CODES = {"invalid_url", "repo_not_found", "ref_not_found", "repo_empty", "repo_too_large", "github_unavailable",
-                 "license_missing", "license_not_permissive", "unsupported_language", "unsupported_build",
+                 "unsupported_language", "unsupported_build",
                  "no_python_package", "multiple_packages", "unsupported_dependency", "import_failed",
                  "no_callable_function", "multiple_entry_points", "entry_point_not_found", "unsupported_input",
                  "unsupported_output", "test_failed", "verification_failed", "sandbox_unavailable",
@@ -321,7 +321,7 @@ def _operation_name(customer_id: str, import_id, repo: str, function: str, commi
 
 
 def _manifest(name: str, row: Dict[str, Any], info: packaging.PackageInfo, res: Dict[str, Any],
-              spdx: str, copyright_lines: List[str]) -> Dict[str, Any]:
+              spdx: str, copyright_lines: List[str], has_license_file: bool = True) -> Dict[str, Any]:
     fn, repo = res["function"], row["repo_full_name"]
     summary = (res.get("summary") or info.description or f"Run {fn} from {repo}").strip()
     summary = (summary if len(summary) >= 10 else f"{summary} ({fn} from {repo})")[:300]
@@ -339,7 +339,7 @@ def _manifest(name: str, row: Dict[str, Any], info: packaging.PackageInfo, res: 
         "built_on": {"project": repo, "license": spdx,
                      "copyright": "; ".join(copyright_lines)[:500] or f"Copyright the {repo} authors",
                      "source": f"https://github.com/{repo}/tree/{row['commit_sha']}",
-                     "license_file": f"imports/{row['id']}/LICENSE",
+                     "license_file": f"imports/{row['id']}/LICENSE" if has_license_file else "none",
                      "dependency": {"manager": "github", "name": repo, "version": row["commit_sha"][:12],
                                     "commit": row["commit_sha"]}},
     }
@@ -373,14 +373,11 @@ def process(row: Dict[str, Any]) -> None:
         ref = github.parse_url(row["repo_url"])
         _update(import_id, stage="fetching")
         FETCH(ref, row["commit_sha"], src)
-        _update(import_id, stage="checking_license")
-        files = licensing.license_files(src)
-        ok, spdx, why = licensing.verdict(files)
-        if not ok:
-            raise ImportFailure("license_missing" if spdx is None else "license_not_permissive", why)
-        lic = next(f for f in files if f["spdx_guess"] != "NOTICE")
-        shutil.copyfile(src / lic["file"], work / "LICENSE")
-        _update(import_id, stage="analyzing", license_spdx=spdx, license_text=lic["text"][:200_000])
+        _update(import_id, stage="reading_license")  # recorded for attribution; never accepts or rejects
+        spdx, lic = licensing.attribution(licensing.license_files(src))
+        if lic is not None:
+            shutil.copyfile(src / lic["file"], work / "LICENSE")
+        _update(import_id, stage="analyzing", license_spdx=spdx, license_text=lic["text"][:200_000] if lic else None)
         info = packaging.analyze(src, ref.repo)
         _update(import_id, stage="installing")
         pins = installer.install(info.dependencies, site)
@@ -394,7 +391,8 @@ def process(row: Dict[str, Any]) -> None:
         _validate_discovery(res, info.module)
         _update(import_id, stage="registering")
         name = _operation_name(row["customer_id"], import_id, ref.repo, res["function"], row["commit_sha"])
-        manifest = _manifest(name, row, info, res, spdx, lic["copyright_lines"])
+        manifest = _manifest(name, row, info, res, spdx, lic["copyright_lines"] if lic else [],
+                             has_license_file=lic is not None)
         manifests.parse(manifest)  # same format checks as built-in operations
         spec = {"module": info.module, "function": res["function"], "params": res["params"],
                 "root": str(info.root.relative_to(src)).replace("\\", "/") if info.root != src else "",

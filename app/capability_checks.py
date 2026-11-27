@@ -84,8 +84,12 @@ def check(cap: Capability, caps: List[Capability]) -> List[str]:
     if leaked:
         problems.append(f"public text mentions library names {leaked}")
 
+    # Attribution, not approval: any license is fine, but a repo's license file must be kept.
+    # A repo that ships no license file is recorded as license NOASSERTION, license_file "none".
     lic = ROOT / cap.built_on.license_file
-    if not cap.built_on.license_file.startswith("licenses/") or not lic.is_file() or lic.stat().st_size < 200:
+    no_file = cap.built_on.license == "NOASSERTION" and cap.built_on.license_file == "none"
+    if not no_file and (not cap.built_on.license_file.startswith("licenses/") or not lic.is_file()
+                        or lic.stat().st_size < 200):
         problems.append(f"license file {cap.built_on.license_file} is missing or empty")
     if not _pinned(cap):
         dep = cap.built_on.dependency
