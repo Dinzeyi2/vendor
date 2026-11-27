@@ -78,18 +78,15 @@ def ensure_build(key: str, make: Callable[[Path], Dict[str, Any]]) -> Tuple[Path
     with lock:
         if (final / "build.json").is_file():
             return final, json.loads((final / "build.json").read_text()), True
-        tmp = builds_dir() / f".{key}.{os.getpid()}.{int(time.time())}"
-        shutil.rmtree(tmp, ignore_errors=True)
-        tmp.mkdir(parents=True)
+        # Built in place (build.json, written last, marks it complete): compiled programs often embed
+        # absolute paths (their data directory), so the folder must not move after the build.
+        shutil.rmtree(final, ignore_errors=True)
+        final.mkdir(parents=True)
         try:
-            info = make(tmp)
-            # paths were recorded inside the temporary folder; point them at the final one
-            info = json.loads(json.dumps(info).replace(json.dumps(str(tmp))[1:-1], json.dumps(str(final))[1:-1]))
-            (tmp / "build.json").write_text(json.dumps(info))
-            shutil.rmtree(final, ignore_errors=True)
-            os.replace(tmp, final)
+            info = make(final)
+            (final / "build.json").write_text(json.dumps(info))
         except BaseException:
-            shutil.rmtree(tmp, ignore_errors=True)
+            shutil.rmtree(final, ignore_errors=True)
             raise
     return final, info, False
 
@@ -414,21 +411,30 @@ def native_build(src: Path, plan: Dict[str, Any], out: Path) -> Dict[str, Any]:
     bcfg = plan.get("build") or {}
     system = bcfg.get("system") or nat.get("system")
     builddir = proj / "_cognex_build"
+    # Everything is configured for, and installed into, a prefix inside this build: programs that
+    # compile in where their data lives (fonts, dictionaries, templates) then find it at run time.
+    prefix = proj / "_cognex_install"
+    make = tool("make") or "make"
     if bcfg.get("commands"):
         steps = [{"argv": c, "cwd": str(proj)} for c in bcfg["commands"]]
     elif system == "cmake":
         if not tool("cmake"):
             raise NeedsRuntime("native", "CMake isn't installed on the build workers.", [{"field": "runtime", "why": "cmake"}])
         steps = [{"argv": [tool("cmake"), "-S", str(proj), "-B", str(builddir), "-DCMAKE_BUILD_TYPE=Release",
-                           "-DBUILD_TESTING=OFF", *bcfg.get("cmake_args", [])], "cwd": str(proj)},
-                 {"argv": [tool("cmake"), "--build", str(builddir), "--parallel", JOBS], "cwd": str(proj)}]
+                           "-DBUILD_TESTING=OFF", f"-DCMAKE_INSTALL_PREFIX={prefix}", *bcfg.get("cmake_args", [])],
+                  "cwd": str(proj)},
+                 {"argv": [tool("cmake"), "--build", str(builddir), "--parallel", JOBS], "cwd": str(proj)},
+                 {"argv": [tool("cmake"), "--install", str(builddir)], "cwd": str(proj), "optional": True}]
     elif system == "autotools":
         steps = [{"argv": [tool("autoreconf") or "autoreconf", "-fi"], "cwd": str(proj)}] if nat.get("autoreconf") \
             and not (proj / "configure").is_file() else []
-        steps += [{"argv": ["sh", "./configure", *bcfg.get("cmake_args", [])], "cwd": str(proj)},
-                 {"argv": [tool("make") or "make", f"-j{JOBS}", *bcfg.get("make_args", [])], "cwd": str(proj)}]
-    else:
-        steps = [{"argv": [tool("make") or "make", f"-j{JOBS}", *bcfg.get("make_args", [])], "cwd": str(proj)}]
+        steps += [{"argv": ["sh", "./configure", f"--prefix={prefix}", *bcfg.get("cmake_args", [])], "cwd": str(proj)},
+                  {"argv": [make, f"-j{JOBS}", *bcfg.get("make_args", [])], "cwd": str(proj)},
+                  {"argv": [make, "install", *bcfg.get("make_args", [])], "cwd": str(proj), "optional": True}]
+    else:  # plain Makefiles: the conventional prefix variables, for the build and the install
+        where = [f"prefix={prefix}", f"PREFIX={prefix}"]
+        steps = [{"argv": [make, f"-j{JOBS}", *where, *bcfg.get("make_args", [])], "cwd": str(proj)},
+                 {"argv": [make, "install", *where, *bcfg.get("make_args", [])], "cwd": str(proj), "optional": True}]
     if not (tool("cc") or tool("gcc")) and not bcfg.get("commands"):
         raise NeedsRuntime("native", "No C/C++ compiler is installed on the build workers.",
                            [{"field": "runtime", "why": "a C/C++ toolchain (build-essential)"}])
@@ -458,6 +464,14 @@ def native_build(src: Path, plan: Dict[str, Any], out: Path) -> Dict[str, Any]:
             if re.search(r"(?i)(^|[/_-])(test|tests|bench|benchmark|example|fuzz)", rel):
                 continue
             exes.append(p)
+        # the installed copy (next to its data) wins over the one in the build tree
+        exes.sort(key=lambda p: (prefix not in p.parents, len(p.parts)))
+        seen, unique = set(), []
+        for p in exes:
+            if p.name not in seen:
+                seen.add(p.name)
+                unique.append(p)
+        exes = unique
     libs = [p.relative_to(proj).as_posix() for p in proj.rglob("*") if (p.suffix in (".so", ".a") or
             re.search(r"\.so(\.\d+)+$", p.name)) and "CMakeFiles" not in p.parts][:20]
     return {"runtime": "native", "package_dir": str(proj), "executables": {p.name: str(p) for p in exes[:20]},
@@ -511,8 +525,15 @@ def discover(plan: Dict[str, Any], build: Dict[str, Any], entry_point: Optional[
         spec = {"kind": "asset", "assets_dir": build["assets_dir"], "assets": assets,
                 "assets_source": "rebuilt from source" if rebuilt else
                 "shipped with the package (the build failed: " + str(build.get("build_error") or "")[:200] + ")"}
-        sample = {"path": build["primary"]}
-        return {"spec": spec, "function": "assets", "summary": (build.get("summary") or "Built frontend assets") ,
+        primary = call_asset(spec, {"path": build["primary"]})   # read it in full and check it...
+        body = primary.get("content") or primary.get("content_base64") or ""
+        if not primary.get("bytes") or not body:
+            raise ImportFailure("test_failed", f"The main asset {build['primary']} is empty.")
+        if build["primary"].endswith(".css") and not re.search(r"[{}]", body[:200_000]):
+            raise ImportFailure("test_failed", f"The main stylesheet {build['primary']} doesn't contain CSS rules.")
+        spec["verified_asset"] = {k: primary[k] for k in ("path", "bytes", "sha256", "content_type")}  # ...keep a summary
+        sample = {}  # the sample is the asset listing: small, whatever the size of the stylesheets
+        return {"spec": spec, "function": "assets", "summary": (build.get("summary") or "Built frontend assets"),
                 "input_schema": {"type": "object", "properties": {"path": {"enum": paths, "description":
                                  "Asset to return; omit to list all assets"}}},
                 "sample_inputs": sample, "sample_output": call_asset(spec, sample), "signature": "assets(path?)"}
@@ -536,8 +557,9 @@ def discover(plan: Dict[str, Any], build: Dict[str, Any], entry_point: Optional[
                                                        "unsupported_input") and build.get("scripts") and not entry:
             try:  # a command-line tool: fall back to its documented commands
                 return _discover_command(plan, build, None, None)
-            except ImportFailure:
-                pass
+            except ImportFailure as cli_failure:
+                if res.get("code") == "no_callable_function":
+                    raise  # nothing to call but the tool: its failure (exit code, stderr) is the blocker
         if not res.get("ok") and res.get("code") in ("no_callable_function", "unsupported_input", "unsupported_output",
                                                        "multiple_entry_points"):
             raise NeedsConfig(str(res.get("reason")), [{"field": "operation" if res.get("code") != "multiple_entry_points"
@@ -570,7 +592,8 @@ def discover(plan: Dict[str, Any], build: Dict[str, Any], entry_point: Optional[
             try:
                 return _discover_command(plan, build, None, None)
             except ImportFailure:
-                pass
+                if res.get("code") in ("no_callable_function", "import_failed"):
+                    raise  # a command-line package: the tool's failure (exit code, stderr) is the blocker
         res = _discovered(res)
         return {"spec": {"kind": "node", "function": res["function"], "params": res["params"],
                          "package_dir": build["package_dir"], "main": res.get("entry") or build["main"],
@@ -634,7 +657,7 @@ def _discover_command(plan, build, op, entry) -> Dict[str, Any]:
                                              "args": {"type": "array", "items": {"type": "string"}},
                                              "stdin": {"type": "string"}}},
                                          "sample_inputs": {"args": ["--version"]}}},
-                          executables=sorted(bins), tried=res.get("tried") or [])
+                          executables=sorted(bins), tried=res.get("tried") or [])  # incl. exit codes + stderr
     spec = {"kind": "command", "argv": [f"{{bin:{res['bin']}}}", "{args...}"], "stdin": "{stdin}",
             "output": res.get("output") or "stdout", "bins": {res["bin"]: bins[res["bin"]]}, "env": _cmd_env(build)}
     return {"spec": spec, "function": res["bin"], "summary": build.get("summary") or f"Run the {res['bin']} command",
@@ -695,8 +718,11 @@ def call(spec: Dict[str, Any], build: Dict[str, Any], inputs: Dict[str, Any], ti
          on_start=None) -> Dict[str, Any]:
     """One production call (untrusted code runs in a fresh sandbox): {"ok", "output"} or an error."""
     kind = spec.get("kind", "function")
-    if kind == "asset":
-        return {"ok": True, "output": call_asset(spec, inputs)}
+    if kind == "asset":  # static files: read directly; a successful read is a started (billed) operation
+        output = call_asset(spec, inputs)
+        if on_start is not None:
+            on_start()
+        return {"ok": True, "output": output}
     mem = _mem(spec)
     if kind == "function":
         return sandbox.run("call", {"spec": spec, "inputs": inputs}, paths=build["paths"], timeout=timeout,

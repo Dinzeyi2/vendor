@@ -1,0 +1,3 @@
+# failcli
+
+No examples.

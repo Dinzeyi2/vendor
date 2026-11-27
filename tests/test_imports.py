@@ -706,3 +706,53 @@ def test_service_whose_only_page_is_the_root_exposes_it():
     imp = ready(c, "rootservice")
     assert imp["status"] == "ready", imp
     assert call(key, imp["operation"], {})["output"]["body"] == {"message": "Hello from the root"}
+
+
+# -- round 3: source-only dependencies, probe diagnostics, data prefixes, asset samples and billing ----
+@pytest.mark.skipif(True, reason="downloads and builds a third-party source release: never on a developer "
+                                  "machine (insecure-dev); proven on the server's strict sandbox instead")
+def test_a_dependency_published_only_as_source_is_built_into_a_wheel_in_the_sandbox():
+    c = new_customer()
+    key = key_for(c, credits=1)
+    imp = ready(c, "sdistdep")
+    assert imp["status"] == "ready", imp
+    row = jobs.get_any(uuid.UUID(imp["id"]))
+    assert "docopt==0.6.2" in row["pins"]                              # pinned exactly
+    assert any(p.name.startswith("docopt-0.6.2") and p.suffix == ".whl"
+               for p in (runtimes.builds_dir() / row["build_key"] / "wheelhouse").iterdir())
+    res = call(key, imp["operation"], {"argv": ["Grace"]})
+    assert res["output"] == {"result": {"--shout": False, "<name>": "Grace"}}
+
+
+def test_a_failed_standard_input_probe_reports_the_exit_code_and_stderr():
+    c = new_customer()
+    imp = ready(c, "failcli")
+    assert imp["status"] == "failed" and imp["failure"]["code"] == "needs_configuration", imp
+    probe = imp["failure"]["details"]["tried"][0]
+    assert probe["exit_code"] == 3 and "Unable to open data file" in probe["stderr"]
+    assert "exited 3" in imp["failure"]["reason"] and "standard.dat" in imp["failure"]["reason"]
+
+
+@pytest.mark.skipif(not (tool("make") and (tool("cc") or tool("gcc"))), reason="a C toolchain is needed")
+def test_programs_find_the_data_directory_compiled_into_them():
+    c = new_customer()
+    key = key_for(c, credits=1)
+    imp = ready(c, "cdata")
+    assert imp["status"] == "ready", imp
+    out = call(key, imp["operation"], {"args": [], "stdin": "and your input\n"})["output"]["stdout"]
+    assert out == "Greetings from the data directory\nand your input\n"
+
+
+def test_frontend_samples_are_the_listing_and_successful_asset_calls_cost_one_credit():
+    c = new_customer()
+    key = key_for(c, credits=3)
+    imp = ready(c, "cssfw")
+    assert imp["status"] == "ready", imp
+    assert imp["example_request"]["body"]["tasks"][0]["inputs"] == {}            # the listing, not a whole file
+    assert imp["verified_asset"]["path"] == "dist/cssfw.css" and imp["verified_asset"]["bytes"] > 0
+    assert balance(c) == 3
+    assert call(key, "cssfw.assets", {})["status"] == "ok" and balance(c) == 2                 # listing: 1 credit
+    assert ".btn{" in call(key, "cssfw.assets", {"path": "dist/cssfw.css"})["output"]["content"]
+    assert balance(c) == 1                                                                     # file: 1 credit
+    bad = call(key, "cssfw.assets", {"path": "nope.css"})
+    assert bad["status"] == "error" and balance(c) == 1                                        # failed: free

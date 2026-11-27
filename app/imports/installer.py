@@ -2,7 +2,8 @@
 
 Wheels only (`--only-binary=:all:`): installing a wheel copies files and never runs package code,
 so nothing untrusted executes here even though this step needs the network (pip talks to PyPI
-only). Requirements the base environment already satisfies are skipped; the installed set is
+only). A dependency published only as source is built into a wheel first, by app/imports/sources.py,
+in the offline sandbox; this process still only installs wheels. Requirements the base environment already satisfies are skipped; the installed set is
 recorded as exact pins so the import can be rebuilt identically after a redeploy.
 The folder goes on the sandbox's sys.path (not as a site dir, so .pth files are never processed).
 """
@@ -18,12 +19,14 @@ from importlib import metadata
 from pathlib import Path
 from typing import List
 
+from app.imports import sources
 from app.imports.github import ImportFailure
 
 from app.imports.profiles import CEILING  # noqa: E402
 
 MAX_SITE_BYTES = CEILING["deps_mb"] * 1024 * 1024   # largest worker profile; the profile is chosen from the size
 INDEX = "https://pypi.org/simple"
+MAX_SOURCE_BUILDS = 6   # source-only dependencies built per install
 # PyTorch's own CPU-only wheels: the PyPI ones bundle several GB of CUDA libraries a CPU worker can't use.
 EXTRA_INDEXES = ["https://download.pytorch.org/whl/cpu"]
 
@@ -66,14 +69,45 @@ def _pip(args: List[str], timeout: float) -> subprocess.CompletedProcess:
 def _explain(stderr: str) -> str:
     m = re.search(r"No matching distribution found for ([^\s]+)", stderr)
     if m:
-        return (f"Dependency '{m.group(1)}' has no prebuilt package (wheel) for Linux / Python "
-                f"{sys.version_info.major}.{sys.version_info.minor}. Dependencies are installed as prebuilt "
-                f"wheels; pin a version that has one in the repo configuration (extra_requirements).")
+        return (f"Dependency '{m.group(1)}' has no package for Linux / Python "
+                f"{sys.version_info.major}.{sys.version_info.minor}, neither a wheel nor a source release Cognex "
+                f"could build.")
     m = re.search(r"ResolutionImpossible|conflicting dependencies", stderr)
     if m:
         return "The dependencies conflict with each other and can't be installed together."
     tail = " ".join(stderr.strip().splitlines()[-3:])[:300]
     return f"The dependencies couldn't be installed: {tail}"
+
+
+def _pins_from(report: Path) -> List[str]:
+    pins = []
+    try:
+        for item in json.loads(report.read_text(encoding="utf-8")).get("install", []):
+            md = item.get("metadata", {})
+            if md.get("name") and md.get("version"):
+                pins.append(f"{md['name']}=={md['version']}")
+    except (OSError, json.JSONDecodeError):
+        pass
+    return pins
+
+
+def _with_source_builds(args: List[str], site: Path, timeout: float) -> subprocess.CompletedProcess:
+    """pip install, wheels only. A requirement that exists only as source (no wheel at all) is fetched
+    as its pinned sdist, built into a wheel in the offline sandbox, and the install retried with it."""
+    wheelhouse = site.parent / "wheelhouse"
+    built: List[str] = []
+    for _ in range(MAX_SOURCE_BUILDS + 1):
+        extra = ["--find-links", str(wheelhouse)] if wheelhouse.is_dir() else []
+        proc = _pip([*args[:1], *extra, *args[1:]], timeout)
+        m = re.search(r"No matching distribution found for ([^\s]+)", proc.stderr)
+        if proc.returncode == 0 or not m or len(built) >= MAX_SOURCE_BUILDS:
+            return proc
+        req = m.group(1)
+        if req in built:
+            return proc
+        sources.build_wheel(req, wheelhouse, site.parent)  # raises ImportFailure with the exact reason
+        built.append(req)
+    return proc
 
 
 def install(requirements: List[str], site: Path, timeout: float = 900, skip_satisfied: bool = True) -> List[str]:
@@ -84,19 +118,12 @@ def install(requirements: List[str], site: Path, timeout: float = 900, skip_sati
         return []
     with tempfile.TemporaryDirectory() as tmp:
         report = Path(tmp) / "report.json"
-        proc = _pip(["install", "--target", str(site), "--only-binary=:all:", "--index-url", INDEX,
-                     *[a for u in EXTRA_INDEXES for a in ("--extra-index-url", u)],
-                     "--no-warn-script-location", "--report", str(report), *needed], timeout)
+        proc = _with_source_builds(["install", "--target", str(site), "--only-binary=:all:", "--index-url", INDEX,
+                                    *[a for u in EXTRA_INDEXES for a in ("--extra-index-url", u)],
+                                    "--no-warn-script-location", "--report", str(report), *needed], site, timeout)
         if proc.returncode != 0:
             raise ImportFailure("unsupported_dependency", _explain(proc.stderr), requirements=needed)
-        pins = []
-        try:
-            for item in json.loads(report.read_text(encoding="utf-8")).get("install", []):
-                md = item.get("metadata", {})
-                if md.get("name") and md.get("version"):
-                    pins.append(f"{md['name']}=={md['version']}")
-        except (OSError, json.JSONDecodeError):
-            pass
+        pins = _pins_from(report)
     if _size(site) > MAX_SITE_BYTES:
         raise ImportFailure("insufficient_resources",
                             f"The dependencies are larger than {MAX_SITE_BYTES // (1024 * 1024)} MB, the limit of the "
@@ -118,8 +145,8 @@ def reinstall(pins: List[str], site: Path, timeout: float = 300) -> None:
     site.mkdir(parents=True, exist_ok=True)
     if not pins:
         return
-    proc = _pip(["install", "--target", str(site), "--only-binary=:all:", "--no-deps", "--index-url", INDEX,
-                 *[a for u in EXTRA_INDEXES for a in ("--extra-index-url", u)],
-                 "--no-warn-script-location", *pins], timeout)
+    proc = _with_source_builds(["install", "--target", str(site), "--only-binary=:all:", "--no-deps",
+                                "--index-url", INDEX, *[a for u in EXTRA_INDEXES for a in ("--extra-index-url", u)],
+                                "--no-warn-script-location", *pins], site, timeout)
     if proc.returncode != 0:
         raise ImportFailure("unsupported_dependency", _explain(proc.stderr))

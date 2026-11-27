@@ -864,7 +864,7 @@ def command(payload: dict) -> dict:
     if proc.returncode != 0:
         msg = f"the command exited with code {proc.returncode}: {err.strip()[-600:]}"
         return {"ok": False, "error_type": "operation_failed", "code": "test_failed", "error": msg[:900],
-                "reason": msg[:900], "exit_code": proc.returncode}
+                "reason": msg[:900], "exit_code": proc.returncode, "stderr": err[-1500:]}
     mode = spec.get("output", "stdout")
     try:
         if mode == "stdout":
@@ -950,7 +950,7 @@ def _cli_examples(readme: str, bins: List[str]) -> List[dict]:
 FILTER_SAMPLE = "Hello from Cognex\n"
 
 
-def _probe_filters(bins: dict, payload: dict) -> Optional[dict]:
+def _probe_filters(bins: dict, payload: dict, tried: Optional[list] = None) -> Optional[dict]:
     """No documented example: many command-line programs are filters (standard input in, standard
     output out). Run each with sample text and no arguments; the first that answers becomes the
     operation, with binary output (e.g. a compressor) returned as base64."""
@@ -965,6 +965,10 @@ def _probe_filters(bins: dict, payload: dict) -> Optional[dict]:
         if res.get("ok") and (out.get("stdout") or "").strip() or out.get("stdout_base64"):
             return {"ok": True, "bin": name, "sample_inputs": inputs, "sample_output": out, "expected_checked": False,
                     "filter": True, "output": "stdout_auto"}
+        if tried is not None:  # exactly what the program said, so the blocker is visible
+            tried.append({"command": f"{name} < {FILTER_SAMPLE.strip()!r}", "exit_code": res.get("exit_code", 0),
+                          "stderr": (res.get("stderr") or "")[-600:],
+                          "result": res.get("reason") or "exit code 0 but no output"})
     return None
 
 
@@ -994,13 +998,17 @@ def cli_discover(payload: dict) -> dict:
             continue
         return {"ok": True, "bin": ex["bin"], "sample_inputs": inputs, "sample_output": res["output"],
                 "expected_checked": ex["expected"] is not None, "examples_found": len(examples)}
-    filt = _probe_filters(bins, payload)
+    filt = _probe_filters(bins, payload, tried)
     if filt is not None:
         return filt
-    return {"ok": False, "code": "needs_configuration", "tried": tried[:6],
-            "reason": ("No runnable example of " + ", ".join(sorted(bins)) + " was found in the README"
-                       if not examples else "None of the README examples of " + ", ".join(sorted(bins))
-                       + " ran as documented: " + "; ".join(tried[:3]))[:900]}
+    probes = [t for t in tried if isinstance(t, dict)]
+    return {"ok": False, "code": "needs_configuration", "tried": tried[:10],
+            "reason": (("No runnable example of " + ", ".join(sorted(bins)) + " was found in the README"
+                        if not examples else "None of the README examples of " + ", ".join(sorted(bins))
+                        + " ran as documented: " + "; ".join(str(t) for t in tried[:3] if isinstance(t, str)))
+                       + ("; run as a standard-input filter: " + "; ".join(
+                           f"{p['command']} exited {p['exit_code']}: {(p['stderr'] or p['result']).strip()[-200:]}"
+                           for p in probes[:3]) if probes else ""))[:1200]}
 
 
 # -- Node.js (JavaScript / TypeScript) ----------------------------------------------------------------
