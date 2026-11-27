@@ -55,7 +55,7 @@ def _call(fn, *args):
 class ImportRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     url: str = Field(min_length=10, max_length=300, description="Public GitHub repository URL")
-    entry_point: Optional[str] = Field(default=None, max_length=100,
+    entry_point: Optional[str] = Field(default=None, max_length=220,
                                        description="Optional: the function to use when a repo has several")
     retry: bool = Field(default=False, description="Retry a failed import of the same commit")
 
@@ -209,6 +209,22 @@ def admin_refresh_attribution(import_id: uuid.UUID):
     if out is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "import not found")
     return out
+
+
+class EntryPointChoice(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    entry_point: str = Field(min_length=1, max_length=220,
+                             description="One of the candidates the import listed: a function, export, command or 'POST /path'")
+
+
+@router.post("/v1/admin/imports/{import_id}/entry-point", dependencies=[Depends(require_operator)],
+             include_in_schema=False)
+def admin_choose_entry_point(import_id: uuid.UUID, body: EntryPointChoice):
+    """Pick the entry point of an ambiguous repo: saved as its configuration and its failed imports re-run."""
+    try:
+        return jsonable_encoder(_call(jobs.choose_entry_point, import_id, body.entry_point))
+    except jobs.SubmitError as exc:
+        return JSONResponse(status_code=exc.status, content={"error": exc.code, "message": exc.reason})
 
 
 @router.post("/v1/admin/imports/{import_id}/unpublish", dependencies=[Depends(require_operator)],

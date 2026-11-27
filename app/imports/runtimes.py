@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.config import ROOT, node_bin, node_headers, npm_cli, tool
-from app.imports import installer, packaging, sandbox
+from app.imports import installer, packaging, profiles, sandbox
 from app.imports.github import ImportFailure
 from app.imports.plan import NeedsConfig, NeedsRuntime
 
@@ -56,7 +56,8 @@ def build_key(plan: Dict[str, Any], commit: str, src: Path) -> str:
         if p.is_file():
             locks[name] = hashlib.sha256(p.read_bytes()).hexdigest()
     relevant = {k: plan.get(k) for k in ("runtime", "root", "package", "version", "extra_requirements", "build",
-                                         "executables", "assets")}
+                                         "executables", "assets", "service")}
+    relevant["service_config"] = (plan.get("config") or {}).get("service")
     raw = json.dumps({"commit": commit, "plan": relevant, "locks": locks, "toolchain": _toolchain(), "v": 1},
                      sort_keys=True)
     return hashlib.sha256(raw.encode()).hexdigest()[:32]
@@ -100,10 +101,13 @@ def _scratch() -> Path:
 
 
 def _steps(steps: List[dict], *, network: bool, writable: List[Path], paths: List[str] = (), timeout: int,
-           env: Optional[dict] = None, what: str = "build") -> Dict[str, Any]:
+           env: Optional[dict] = None, what: str = "build", plan: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    prof = profiles.get((plan or {}).get("profile", "standard"))
+    timeout = max(timeout, prof["build_timeout"]) if not network else timeout
     res = sandbox.run("exec", {"steps": steps, "env": env or {}, "timeout": timeout}, paths=list(paths),
                       timeout=timeout + 30, scratch_root=_scratch(), profile="fetch" if network else "build",
-                      network=network, writable=writable)
+                      network=network, writable=writable,
+                      memory_mb=None if network else prof["build_memory_mb"])
     if res.get("ok"):
         return res
     if res.get("code") in ("sandbox_unavailable", "timeout", "sandbox_crashed"):
@@ -257,7 +261,7 @@ def python_build(src: Path, plan: Dict[str, Any], out: Path, commit: str, pins: 
                        "--wheel-dir", str(wheels), str(proj)], "cwd": str(proj)}]
     steps += [{"argv": c, "cwd": str(proj)} for c in (plan.get("build") or {}).get("commands", [])]
     _steps(steps, network=False, writable=[proj, wheels, buildenv], paths=[str(buildenv)], timeout=BUILD_TIMEOUT,
-           env=env)
+           env=env, plan=plan)
     built = sorted(wheels.glob("*.whl"))
     if not built:
         raise ImportFailure("build_failed", "The build finished but produced no wheel.")
@@ -338,7 +342,7 @@ def node_build(src: Path, plan: Dict[str, Any], out: Path) -> Dict[str, Any]:
         steps.append({"argv": pm + ["run", script], "cwd": str(proj)})
     steps += [{"argv": c, "cwd": str(proj)} for c in (plan.get("build") or {}).get("commands", [])]
     if steps:
-        _steps(steps, network=False, writable=[proj, cache], timeout=BUILD_TIMEOUT, env=env)
+        _steps(steps, network=False, writable=[proj, cache], timeout=BUILD_TIMEOUT, env=env, plan=plan)
     shutil.rmtree(cache, ignore_errors=True)
     pkg = json.loads((proj / "package.json").read_text(encoding="utf-8", errors="replace"))
     return {"runtime": plan["runtime"], "package_dir": str(proj), "main": nd.get("main"), "name": pkg.get("name"),
@@ -404,7 +408,9 @@ def native_build(src: Path, plan: Dict[str, Any], out: Path) -> Dict[str, Any]:
                            "-DBUILD_TESTING=OFF", *bcfg.get("cmake_args", [])], "cwd": str(proj)},
                  {"argv": [tool("cmake"), "--build", str(builddir), "--parallel", JOBS], "cwd": str(proj)}]
     elif system == "autotools":
-        steps = [{"argv": ["sh", "./configure", *bcfg.get("cmake_args", [])], "cwd": str(proj)},
+        steps = [{"argv": [tool("autoreconf") or "autoreconf", "-fi"], "cwd": str(proj)}] if nat.get("autoreconf") \
+            and not (proj / "configure").is_file() else []
+        steps += [{"argv": ["sh", "./configure", *bcfg.get("cmake_args", [])], "cwd": str(proj)},
                  {"argv": [tool("make") or "make", f"-j{JOBS}", *bcfg.get("make_args", [])], "cwd": str(proj)}]
     else:
         steps = [{"argv": [tool("make") or "make", f"-j{JOBS}", *bcfg.get("make_args", [])], "cwd": str(proj)}]
@@ -413,7 +419,7 @@ def native_build(src: Path, plan: Dict[str, Any], out: Path) -> Dict[str, Any]:
                            [{"field": "runtime", "why": "a C/C++ toolchain (build-essential)"}])
     started = time.time()
     _steps(steps, network=False, writable=[proj], timeout=BUILD_TIMEOUT,
-           env={"MAKEFLAGS": f"-j{JOBS}", **_env_for(plan)})
+           env={"MAKEFLAGS": f"-j{JOBS}", **_env_for(plan)}, plan=plan)
     wanted = plan.get("executables")
     if wanted:
         exes = [proj / w for w in wanted if (proj / w).is_file()]
@@ -426,7 +432,8 @@ def native_build(src: Path, plan: Dict[str, Any], out: Path) -> Dict[str, Any]:
         exes = []
         for p in proj.rglob("*"):
             rel = p.relative_to(proj).as_posix()
-            if not p.is_file() or "CMakeFiles" in p.parts or p.suffix in (".so", ".a", ".o", ".dylib", ".sh", ".py"):
+            if not p.is_file() or "CMakeFiles" in p.parts or p.suffix in (".so", ".a", ".o", ".dylib", ".sh", ".py") \
+                    or re.search(r"\.so(\.\d+)+$", p.name) or ".libs" in p.parts or ".deps" in p.parts:
                 continue
             if p.stat().st_mtime < started - 1 or not os.access(p, os.X_OK):
                 continue
@@ -436,10 +443,44 @@ def native_build(src: Path, plan: Dict[str, Any], out: Path) -> Dict[str, Any]:
             if re.search(r"(?i)(^|[/_-])(test|tests|bench|benchmark|example|fuzz)", rel):
                 continue
             exes.append(p)
-    libs = [p.relative_to(proj).as_posix() for p in proj.rglob("*") if p.suffix in (".so", ".a") and
-            "CMakeFiles" not in p.parts][:20]
+    libs = [p.relative_to(proj).as_posix() for p in proj.rglob("*") if (p.suffix in (".so", ".a") or
+            re.search(r"\.so(\.\d+)+$", p.name)) and "CMakeFiles" not in p.parts][:20]
     return {"runtime": "native", "package_dir": str(proj), "executables": {p.name: str(p) for p in exes[:20]},
             "libraries": libs, "readme": _readme(proj), "summary": ""}
+
+
+# -- HTTP services ------------------------------------------------------------------------------------
+def service_build(src: Path, plan: Dict[str, Any], out: Path, pins: Optional[List[str]]) -> Dict[str, Any]:
+    from app.imports import services
+    svc = plan["service"]
+    cfg = (plan.get("config") or {}).get("service") or {}
+    if svc["runtime"] == "node":
+        info = node_build(src, {**plan, "runtime": "node"}, out)
+        app_dir = Path(info["package_dir"])
+        start = cfg.get("start") or services.node_start(app_dir, plan["node"])
+        if not start:
+            raise NeedsConfig("Cognex couldn't tell how to start this Node.js server (no start script or main file).",
+                              [{"field": "service.start", "why": "the command that starts the server on $PORT"}],
+                              {"service": {"start": ["node", "server.js"]}})
+        return {**info, "runtime": "service", "service_runtime": "node", "app_dir": str(app_dir), "paths": [],
+                "start": start, "env": cfg.get("env") or {}, "scratch_root": str(_scratch())}
+    proj = _copy_src(src, plan, out / "src")
+    site = out / "site"
+    site.mkdir()
+    reqs = list((plan.get("python") or {}).get("requires") or [])
+    if not reqs and (proj / "setup.py").is_file():
+        reqs = packaging._setup_py((proj / "setup.py").read_text(encoding="utf-8", errors="replace")).get("install_requires") or []
+        reqs = reqs if isinstance(reqs, list) else []
+    reqs = packaging._clean_reqs([r for r in reqs if isinstance(r, str) and not r.startswith("python")])
+    reqs += list(plan.get("extra_requirements") or [])
+    if pins:
+        installer.reinstall(pins, site)
+    new_pins = pins or installer.install(reqs, site)
+    app = svc.get("app") or {}
+    app_dir = proj / app.get("src_root", "") if app.get("src_root") else proj
+    return {"runtime": "service", "service_runtime": "python", "app_dir": str(app_dir), "paths": [str(site)],
+            "pins": new_pins, "start": cfg.get("start") or services.python_start(app), "env": cfg.get("env") or {},
+            "readme": _readme(proj), "summary": "", "scratch_root": str(_scratch()), "app": app}
 
 
 # -- discovery: one entry point per runtime -----------------------------------------------------------
@@ -472,7 +513,7 @@ def discover(plan: Dict[str, Any], build: Dict[str, Any], entry_point: Optional[
                               candidates=mods[:10])
         res = sandbox.run("discover", {"module": build["module"], "repo_name": plan.get("repo_name", ""),
                                        "readme": build.get("readme"), "entry_point": entry},
-                          paths=build["paths"], timeout=DISCOVER_TIMEOUT, scratch_root=_scratch())
+                          paths=build["paths"], timeout=DISCOVER_TIMEOUT, scratch_root=_scratch(), memory_mb=_mem(plan))
         if not res.get("ok") and res.get("code") in ("no_callable_function", "multiple_entry_points",
                                                        "unsupported_input") and build.get("scripts") and not entry:
             try:  # a command-line tool: fall back to its documented commands
@@ -506,7 +547,7 @@ def discover(plan: Dict[str, Any], build: Dict[str, Any], entry_point: Optional[
             return _verify_configured(plan, build, op, "node", spec)
         res = sandbox.run("node", _node_payload(build, {"mode": "discover", "readme": build.get("readme"),
                                                          "entry_point": entry, "repo_name": plan.get("repo_name")}),
-                          paths=[], timeout=DISCOVER_TIMEOUT, scratch_root=_scratch(), memory_mb=8192)
+                          paths=[], timeout=DISCOVER_TIMEOUT, scratch_root=_scratch(), memory_mb=max(8192, _mem(plan)))
         if not res.get("ok") and build.get("bin") and not entry:
             try:
                 return _discover_command(plan, build, None, None)
@@ -520,7 +561,16 @@ def discover(plan: Dict[str, Any], build: Dict[str, Any], entry_point: Optional[
                 "summary": build.get("summary") or "", "input_schema": res["input_schema"],
                 "sample_inputs": res["sample_inputs"], "sample_output": res["sample_output"],
                 "signature": f"{res['function']}({', '.join(res['params'])})"}
+    if runtime == "service":
+        from app.imports import services
+        res = services.discover(plan, build, entry, memory_mb=max(4096, _mem(plan)))
+        res["function"] = re.sub(r"[^A-Za-z0-9_]+", "_", res["function"]).strip("_")[:60] or "endpoint"
+        return res
     raise NeedsRuntime(runtime, f"Cognex has no {runtime} runtime yet.", [{"field": "runtime", "why": runtime}])
+
+
+def _mem(plan_or_spec: Dict[str, Any]) -> int:
+    return profiles.get(plan_or_spec.get("profile", "standard"))["call_memory_mb"]
 
 
 def _node_payload(build: Dict[str, Any], extra: Dict[str, Any]) -> Dict[str, Any]:
@@ -556,7 +606,7 @@ def _discover_command(plan, build, op, entry) -> Dict[str, Any]:
                           {"executables": ["_cognex_build/program"]})
     res = sandbox.run("cli_discover", {"bins": bins, "readme": build.get("readme"), "entry_point": entry,
                                        "env": _cmd_env(build)},
-                      paths=[], timeout=DISCOVER_TIMEOUT, scratch_root=_scratch())
+                      paths=[], timeout=DISCOVER_TIMEOUT, scratch_root=_scratch(), memory_mb=_mem(plan))
     if not res.get("ok"):
         name = sorted(bins)[0]
         raise NeedsConfig(str(res.get("reason")), [{"field": "operation", "why": f"the command line to run "
@@ -585,7 +635,7 @@ def _verify_configured(plan, build, op, mode: str, spec: Dict[str, Any]) -> Dict
                            {"field": "operation.sample_inputs", "why": "a real input to test before Ready"}],
                           {"operation": {**op, "input_schema": {"type": "object", "properties": {}},
                                          "sample_inputs": {}}})
-    out = call(spec, build, op["sample_inputs"], DISCOVER_TIMEOUT)
+    out = call({**spec, "profile": plan.get("profile", "standard")}, build, op["sample_inputs"], DISCOVER_TIMEOUT)
     if not out.get("ok"):
         raise ImportFailure(str(out.get("code") or "test_failed") if out.get("code") in
                             ("unsupported_output", "timeout") else "test_failed",
@@ -629,19 +679,24 @@ def call(spec: Dict[str, Any], build: Dict[str, Any], inputs: Dict[str, Any], ti
     kind = spec.get("kind", "function")
     if kind == "asset":
         return {"ok": True, "output": call_asset(spec, inputs)}
+    mem = _mem(spec)
     if kind == "function":
         return sandbox.run("call", {"spec": spec, "inputs": inputs}, paths=build["paths"], timeout=timeout,
-                           scratch_root=_scratch(), on_start=on_start)
+                           scratch_root=_scratch(), on_start=on_start, memory_mb=mem)
     if kind == "chain":
         return sandbox.run("chain", {"spec": spec, "inputs": inputs}, paths=build["paths"], timeout=timeout,
-                           scratch_root=_scratch(), on_start=on_start)
+                           scratch_root=_scratch(), on_start=on_start, memory_mb=mem)
     if kind == "node":
         return sandbox.run("node", _node_payload(build, {"mode": "call", "spec": spec, "inputs": inputs,
                                                          "timeout": timeout}),
-                           paths=[], timeout=timeout + 5, scratch_root=_scratch(), on_start=on_start, memory_mb=8192)
+                           paths=[], timeout=timeout + 5, scratch_root=_scratch(), on_start=on_start,
+                           memory_mb=max(8192, mem))
     if kind == "command":
         return sandbox.run("command", {"spec": spec, "inputs": inputs, "timeout": timeout}, paths=[],
-                           timeout=timeout + 5, scratch_root=_scratch(), on_start=on_start)
+                           timeout=timeout + 5, scratch_root=_scratch(), on_start=on_start, memory_mb=mem)
+    if kind == "http":
+        from app.imports import services
+        return services.call(spec, build, inputs, timeout, on_start=on_start, memory_mb=mem)
     return {"ok": False, "error_type": "operation_failed", "error": f"unknown operation kind {kind}"}
 
 
@@ -659,6 +714,8 @@ def build(src: Path, plan: Dict[str, Any], commit: str, pins: Optional[List[str]
                 info.update(collect_assets(info, plan, tmp))
         elif rt == "native":
             info = native_build(src, plan, tmp)
+        elif rt == "service":
+            info = service_build(src, plan, tmp, pins)
         else:
             raise NeedsRuntime(rt, f"Cognex has no {rt} runtime yet.", [{"field": "runtime", "why": rt}])
         info["key"] = key

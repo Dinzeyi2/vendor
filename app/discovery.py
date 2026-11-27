@@ -80,6 +80,7 @@ def describe(cap: Capability, base: str, private: bool = False) -> Dict[str, Any
             "default": cap.default_timeout, "maximum": cap.max_timeout,
             "description": "Seconds before the run is stopped; capped at the maximum."}],
         "input_schema": schema,
+        **({"output_schema": cap.output_schema} if cap.output_schema else {}),
         "request_example": {
             "method": "POST", "url": f"{base}/v1/execute",
             "headers": {"Content-Type": "application/json", "X-API-Key": KEY_PLACEHOLDER},

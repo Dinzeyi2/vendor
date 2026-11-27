@@ -993,6 +993,16 @@ def node(payload: dict) -> dict:
             "reason": f"node exited with code {proc.returncode}: {tail}"[:900]}
 
 
-MODES = {"discover": discover, "call": call, "selftest": selftest, "chain": chain, "exec": exec_steps,
+def serve(payload: dict) -> dict:
+    """Run an imported HTTP service until the parent stops it (seccomp "serve": listen, never connect)."""
+    import subprocess
+    env = {**os.environ, **{k: str(v) for k, v in (payload.get("env") or {}).items()}}
+    env["HOME"] = env["TMPDIR"] = payload["scratch"]
+    proc = subprocess.run([str(a) for a in payload["argv"]], cwd=payload.get("cwd") or payload["scratch"], env=env,
+                          stdin=subprocess.DEVNULL)
+    return {"ok": False, "code": "service_failed", "reason": f"the service exited with code {proc.returncode}"}
+
+
+MODES = {"discover": discover, "call": call, "selftest": selftest, "chain": chain, "exec": exec_steps, "serve": serve,
          "command": command, "cli_discover": cli_discover, "node": node}
 

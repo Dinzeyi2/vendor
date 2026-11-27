@@ -617,3 +617,62 @@ def test_long_running_operations_return_a_job_id_and_the_result_comes_from_the_j
     assert call(key, imp["operation"], {"x": 1}, **{"async": False})["output"] == {"result": 2}   # direct on request
     other = key_for(new_customer(), credits=0)
     assert client.get(f"/v1/jobs/{res['job_id']}", headers={"X-API-Key": other}).status_code == 404
+
+
+# -- HTTP services, entry-point choices, response schemas, worker profiles -----------------------------
+def test_python_http_service_is_started_discovered_from_openapi_and_called():
+    c = new_customer()
+    key = key_for(c, credits=2)
+    imp = ready(c, "pyservice")
+    assert imp["status"] == "ready" and imp["runtime"] == "service", imp
+    assert imp["operation"] == "pyservice.reverse_reverse_post" or imp["operation"].startswith("pyservice.")
+    assert imp["input_schema"]["required"] == ["body"]                      # from the app's OpenAPI document
+    assert imp["output_schema"]["properties"]["body"]["type"] == "object"   # response schema, generated
+    res = call(key, imp["operation"], {"body": {"text": "stressed"}})
+    assert res["status"] == "ok" and res["output"]["status"] == 200, res
+    assert res["output"]["body"] == {"reversed": "desserts", "length": 8}
+
+
+@pytest.mark.skipif(not npm_cli(), reason="Node.js is needed")
+def test_node_http_service_routes_come_from_its_source():
+    c = new_customer()
+    key = key_for(c, credits=1)
+    imp = ready(c, "nodeservice")
+    assert imp["status"] == "ready" and imp["runtime"] == "service", imp
+    res = call(key, imp["operation"], {"query": {"text": "one three fifteen"}})
+    assert res["output"]["body"] == {"words": 3, "longest": "fifteen"}, res
+
+
+def test_several_plausible_endpoints_are_listed_and_the_choice_is_saved_as_configuration():
+    c = new_customer()
+    key = key_for(c, credits=2)
+    imp = ready(c, "pyservice2")
+    assert imp["status"] == "failed" and imp["failure"]["code"] == "multiple_entry_points", imp
+    assert set(imp["failure"]["details"]["candidates"]) == {"POST /upper", "POST /lower"}
+    r = admin("POST", f"/v1/admin/imports/{imp['id']}/entry-point", json={"entry_point": "POST /lower"})
+    assert r.status_code == 200 and imp["id"] in r.json()["requeued_imports"], r.text
+    assert admin("GET", "/v1/admin/repo-configs/cognex-fixtures/pyservice2").json()["config"] == {"entry_point": "POST /lower"}
+    run_worker()
+    imp = status_of(c, imp["id"])
+    assert imp["status"] == "ready", imp
+    assert call(key, imp["operation"], {"body": {"text": "MiXeD"}})["output"]["body"] == {"text": "mixed"}
+    other = new_customer()            # the next import of the repo uses the saved choice: no question asked
+    assert ready(other, "pyservice2")["status"] == "ready"
+
+
+def test_function_imports_publish_a_response_schema_and_their_worker_profile():
+    c = new_customer()
+    key_for(c, credits=0)
+    imp = ready(c, "genversion")
+    assert imp["output_schema"] == {"type": "object", "properties": {"result": {"type": "integer"}}}
+    assert imp["worker_profile"] == "standard"
+
+
+def test_heavy_dependencies_move_an_import_to_the_large_worker_profile():
+    from app.imports import profiles
+    assert profiles.choose(extracted_bytes=10 * profiles.MB) == "standard"
+    assert profiles.choose(download_bytes=30 * profiles.MB) == "large"        # the old 25 MB download failure
+    assert profiles.choose(deps_bytes=500 * profiles.MB) == "large"            # the old 400 MB failure
+    assert profiles.choose(requirements=["torch>=2", "numpy"]) == "large"
+    assert profiles.choose(download_bytes=30 * profiles.MB, requested="standard") == "standard"
+    assert profiles.get("large")["call_memory_mb"] > profiles.get("standard")["call_memory_mb"]

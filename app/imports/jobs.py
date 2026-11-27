@@ -29,7 +29,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import jsonschema
 
 from app import accounts, catalog, db, manifests
-from app.imports import configs, github, installer, licensing, packaging, plan as plans, runtimes, sandbox
+from app.imports import configs, github, installer, licensing, packaging, plan as plans, profiles, runtimes, sandbox
 from app.imports.github import ImportFailure
 
 log = logging.getLogger("uvicorn.error")
@@ -46,7 +46,7 @@ FAILURE_CODES = {"invalid_url", "repo_not_found", "ref_not_found", "repo_empty",
                  "no_callable_function", "multiple_entry_points", "entry_point_not_found", "unsupported_input",
                  "unsupported_output", "test_failed", "verification_failed", "sandbox_unavailable",
                  "sandbox_crashed", "timeout", "internal_error", "needs_configuration", "runtime_not_available",
-                 "build_failed"}
+                 "build_failed", "insufficient_resources", "service_failed"}
 CONVERT_RE = re.compile(r"^(tuple|set|ndarray|(enum|enumname):[A-Za-z_][\w.]*:[A-Za-z_][\w.]*)$")
 IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,99}$")
 
@@ -100,6 +100,8 @@ def public_view(row: Dict[str, Any], base_url: str) -> Dict[str, Any]:
             "operation": row["operation"], "summary": m["summary"],
             "function": (row.get("spec") or {}).get("signature"),
             "input_schema": m["input_schema"],
+            "output_schema": m.get("output_schema"),
+            "worker_profile": (row.get("spec") or {}).get("profile", "standard"),
             "license": {"spdx": row["license_spdx"], "copyright": m["built_on"]["copyright"]},
             "example_request": {
                 "method": "POST", "url": f"{base_url}/v1/execute",
@@ -136,8 +138,9 @@ class SubmitError(Exception):
 def submit(customer_id: str, url: str, entry_point: Optional[str] = None,
            retry: bool = False) -> Tuple[Dict[str, Any], bool]:
     """Validate, pin the commit and queue an import. Returns (row, created). Dedupes per commit."""
-    if entry_point is not None and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,99}", entry_point):
-        raise SubmitError(400, "invalid_entry_point", "entry_point must be a Python function name.")
+    if entry_point is not None and not re.fullmatch(r"(?:[A-Za-z_$][A-Za-z0-9_$.]{0,199}|(?:GET|POST|PUT|PATCH|DELETE) /[^\s]{0,200})", entry_point):
+        raise SubmitError(400, "invalid_entry_point", "entry_point must be a function, export or command name, or an "
+                                                      "HTTP endpoint like 'POST /predict'.")
     try:
         ref = github.parse_url(url)
         commit = github.resolve_commit(ref)
@@ -178,6 +181,24 @@ def submit(customer_id: str, url: str, entry_point: Optional[str] = None,
             (uuid.uuid4(), customer_id, ref.url + (f"/tree/{ref.ref}" if ref.ref else ""), ref.full_name, commit,
              entry_point)).fetchone()
     return _row(row), True
+
+
+def choose_entry_point(import_id: uuid.UUID, entry_point: str) -> Dict[str, Any]:
+    """The operator picks one of several plausible entry points: saved as the repo's configuration
+    (so every later import of the repo uses it) and that repo's failed imports re-run with it."""
+    row = get_any(import_id)
+    if row is None:
+        raise SubmitError(404, "not_found", "import not found")
+    if not re.fullmatch(r"(?:[A-Za-z_$][A-Za-z0-9_$.]{0,199}|(?:GET|POST|PUT|PATCH|DELETE) /[^\s]{0,200})", entry_point):
+        raise SubmitError(400, "invalid_entry_point", "entry_point must be a function, export or command name, or an "
+                                                      "HTTP endpoint like 'POST /predict'.")
+    config = dict(configs.get(row["repo_full_name"]) or {})
+    config["entry_point"] = entry_point
+    try:
+        saved = configs.save(row["repo_full_name"], config)
+    except ValueError as exc:
+        raise SubmitError(422, "invalid_config", str(exc)) from None
+    return {"repo": row["repo_full_name"], "config": saved["config"], "requeued_imports": requeue_failed(row["repo_full_name"])}
 
 
 def requeue_failed(repo_full_name: str) -> List[str]:
@@ -395,8 +416,9 @@ def _manifest(name: str, row: Dict[str, Any], plan: Dict[str, Any], res: Dict[st
     while len(intents) < 3:
         intents.append(f"use {repo.split('/')[1]} {len(intents)}")
     sample = res["sample_inputs"]
+    prof = profiles.get(plan.get("profile", "standard"))
     t = res.get("timeout") or ({"default": 300, "max": 3600} if res.get("long_running") else
-                               {"default": CALL_DEFAULT_TIMEOUT, "max": CALL_MAX_TIMEOUT})
+                               {"default": prof["call_timeout"], "max": prof["call_timeout_max"]})
     m = {
         "name": name, "summary": summary, "intents": intents[:12],
         "clarify": f"What inputs should I pass to {fn}? Send data like {json.dumps(sample)[:200]}."[:300],
@@ -413,7 +435,29 @@ def _manifest(name: str, row: Dict[str, Any], plan: Dict[str, Any], res: Dict[st
     }
     if res.get("long_running"):
         m["long_running"] = True
+    m["output_schema"] = schema_of(res["sample_output"])
     return m
+
+
+def schema_of(value: Any, depth: int = 0) -> Dict[str, Any]:
+    """A JSON Schema for a response, inferred from the verified sample output."""
+    if isinstance(value, bool):
+        return {"type": "boolean"}
+    if isinstance(value, int):
+        return {"type": "integer"}
+    if isinstance(value, float):
+        return {"type": "number"}
+    if isinstance(value, str):
+        return {"type": "string"}
+    if value is None:
+        return {"type": "null"}
+    if isinstance(value, list):
+        return {"type": "array", **({"items": schema_of(value[0], depth + 1)} if value and depth < 6 else {})}
+    if isinstance(value, dict):
+        if depth >= 6:
+            return {"type": "object"}
+        return {"type": "object", "properties": {k: schema_of(v, depth + 1) for k, v in list(value.items())[:100]}}
+    return {}
 
 
 def _check_result(res: Dict[str, Any], build: Dict[str, Any]) -> None:
@@ -478,8 +522,28 @@ def process(row: Dict[str, Any]) -> None:
         _update(import_id, runtime=plan["runtime"], plan=plan)
         if plan["runtime"] not in plans.AVAILABLE:
             raise plans.unavailable(plan)
-        _update(import_id, stage="building")
-        key, build, reused = runtimes.build(src, plan, row["commit_sha"])
+        files_count = sum(len(f) for _, _, f in os.walk(src))
+        repo_bytes = profiles.size_of(src)
+        plan["profile"] = profiles.choose(download_bytes=github.downloaded_bytes(src), extracted_bytes=repo_bytes,
+                                          files=files_count, runtime=plan["runtime"],
+                                          requirements=(plan.get("python") or {}).get("requires") or [],
+                                          requested=plan.get("profile"))
+        prof = profiles.get(plan["profile"])
+        profiles.require_disk(runtimes.builds_dir(), int(repo_bytes * 4 / profiles.MB) +
+                              (prof["deps_mb"] // 2 if plan["profile"] == "large" else 512), "Building this repository")
+        _update(import_id, stage="building", plan=plan)
+        try:
+            key, build, reused = runtimes.build(src, plan, row["commit_sha"])
+        except ImportFailure as exc:  # out of time or memory on standard: the large profile, once
+            if plan["profile"] != "standard" or not re.search(r"(?i)timed out|memory|killed|exceeding its", exc.reason):
+                raise
+            plan["profile"] = "large"
+            _update(import_id, plan=plan)
+            key, build, reused = runtimes.build(src, plan, row["commit_sha"])
+        built_bytes = profiles.size_of(runtimes.builds_dir() / key)
+        if plan["profile"] == "standard" and profiles.choose(deps_bytes=built_bytes) == "large":
+            plan["profile"] = "large"      # large dependencies: calls get the large profile's memory and time
+            _update(import_id, plan=plan)
         log.info("import %s: %s build %s (%s)", import_id, plan["runtime"], key[:12], "reused" if reused else "built")
         _update(import_id, stage="discovering", build_key=key, pins=build.get("pins") or [])
         res = runtimes.discover(plan, build, row["entry_point"])
@@ -489,7 +553,7 @@ def process(row: Dict[str, Any]) -> None:
         name = _operation_name(row["customer_id"], import_id, ref.repo, name_hint, row["commit_sha"])
         manifest = _manifest(name, row, plan, res, spdx, holders, has_license_file=lic is not None)
         manifests.parse(manifest)  # same format checks as built-in operations
-        spec = {**res["spec"], "build_key": key, "runtime": plan["runtime"],
+        spec = {**res["spec"], "build_key": key, "runtime": plan["runtime"], "profile": plan["profile"],
                 "build_dir": str(runtimes.builds_dir() / key), "signature": res.get("signature")}
         _update(import_id, stage="verifying", operation=name, manifest=manifest, spec=spec)
         status, body = VERIFY(row["customer_id"], str(import_id), name, res["sample_inputs"])

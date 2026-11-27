@@ -21,9 +21,11 @@ OWNER_RE = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})"
 REPO_RE = r"[A-Za-z0-9._-]{1,100}"
 REF_RE = r"[A-Za-z0-9._/-]{1,200}"
 URL_RE = re.compile(rf"^https://github\.com/({OWNER_RE})/({REPO_RE}?)(?:\.git)?(?:/tree/({REF_RE}))?/?$")
-MAX_DOWNLOAD = 25 * 1024 * 1024        # compressed tarball
-MAX_EXTRACTED = 100 * 1024 * 1024      # total size of extracted files
-MAX_FILES = 5000
+from app.imports.profiles import CEILING  # noqa: E402
+
+MAX_DOWNLOAD = CEILING["download_mb"] * 1024 * 1024    # compressed tarball (largest worker profile)
+MAX_EXTRACTED = CEILING["extracted_mb"] * 1024 * 1024  # total size of extracted files
+MAX_FILES = CEILING["files"]
 USER_AGENT = "Cognex-Importer/1.0"
 
 
@@ -71,7 +73,8 @@ def _get(url: str, limit: int, timeout: float = 30) -> bytes:
     with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 (fixed https hosts only)
         data = r.read(limit + 1)
     if len(data) > limit:
-        raise ImportFailure("repo_too_large", f"The repository download is larger than {limit // (1024 * 1024)} MB.")
+        raise ImportFailure("repo_too_large", f"The repository download is larger than {limit // (1024 * 1024)} MB, the "
+                                              f"limit of the largest worker profile.")
     return data
 
 
@@ -142,6 +145,13 @@ def version_hint(ref: RepoRef, commit: str) -> Optional[str]:
     return None
 
 
+DOWNLOADED: dict = {}  # dest folder -> compressed bytes fetched (input to the worker-profile choice)
+
+
+def downloaded_bytes(dest: Path) -> int:
+    return DOWNLOADED.pop(str(dest), 0)
+
+
 def download(ref: RepoRef, commit: str, dest: Path, submodules: bool = True) -> Path:
     """Fetch and safely extract one commit into dest (replaced), plus its git submodules that
     live on GitHub (tarballs leave them out). Returns dest."""
@@ -196,6 +206,7 @@ def _extract(ref: RepoRef, commit: str, dest: Path, budget: Optional[list] = Non
     if dest.exists():
         shutil.rmtree(dest)
     dest.mkdir(parents=True)
+    DOWNLOADED[str(dest)] = DOWNLOADED.get(str(dest), 0) + len(blob) if budget is not None else len(blob)
     total = count = 0
     limit = MAX_EXTRACTED if budget is None else min(MAX_EXTRACTED, budget[0])
     with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tar:

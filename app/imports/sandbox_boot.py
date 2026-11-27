@@ -21,13 +21,18 @@ import struct
 import sys
 
 
-def _seccomp_filter(network: bool = False) -> bytes:
-    LD_W_ABS, JEQ_K, JGE_K, RET_K = 0x20, 0x15, 0x35, 0x06
+def _seccomp_filter(network=False) -> bytes:
+    """network: False (no sockets but AF_UNIX), True (dependency fetching only: any socket), or
+    "serve" (HTTP services: TCP sockets to listen on, but no connect(), no UDP and no TCP Fast Open,
+    so the service can answer requests yet never reach out)."""
+    LD_W_ABS, JEQ_K, JGE_K, JSET_K, AND_K, RET_K = 0x20, 0x15, 0x35, 0x45, 0x54, 0x06
     ALLOW, KILL = 0x7FFF0000, 0x80000000
     ERRNO = lambda e: 0x00050000 | e  # noqa: E731
     EPERM, EACCES = 1, 13
     AUDIT_ARCH_X86_64 = 0xC000003E
-    SYS_SOCKET = 41
+    SYS_SOCKET, SYS_CONNECT, SYS_SENDTO, SYS_SENDMSG, SYS_SENDMMSG = 41, 42, 44, 46, 307
+    AF_UNIX, AF_INET, AF_INET6, SOCK_STREAM, MSG_FASTOPEN = 1, 2, 10, 1, 0x20000000
+    arg = lambda i: 16 + 8 * i  # noqa: E731  (low 32 bits of seccomp_data.args[i], little-endian)
     deny = [101,  # ptrace
             310, 311,  # process_vm_readv / writev
             321,  # bpf
@@ -41,28 +46,51 @@ def _seccomp_filter(network: bool = False) -> bytes:
             175, 176, 313,  # init_module, delete_module, finit_module
             169,  # reboot
             ]
-    prog = []  # (code, jt, jf, k) with symbolic jump targets resolved below
+    prog = []  # (op, k, jt, jf) with symbolic jump targets resolved below
     prog.append(("ld", 4))
     prog.append(("jeq", AUDIT_ARCH_X86_64, "next", "kill"))
     prog.append(("ld", 0))
     prog.append(("jge", 0x40000000, "kill", "next"))  # x32 ABI
     for nr in deny:
         prog.append(("jeq", nr, "deny", "next"))
-    if not network:  # dependency fetching (no repo code runs) is the only mode with network access
+    if network == "serve":
+        prog.append(("jeq", SYS_SOCKET, "serve_sock", "next"))
+        prog.append(("jeq", SYS_CONNECT, "sockdeny", "next"))
+        prog.append(("jeq", SYS_SENDTO, "flags3", "next"))
+        prog.append(("jeq", SYS_SENDMMSG, "flags3", "next"))
+        prog.append(("jeq", SYS_SENDMSG, "flags2", "next"))
+    elif not network:  # dependency fetching (no repo code runs) is the only mode with full network access
         prog.append(("jeq", SYS_SOCKET, "sock", "next"))
     prog.append(("ret", ALLOW))
-    labels = {}
     prog.append(("label", "kill"))
     prog.append(("ret", KILL))
     prog.append(("label", "deny"))
     prog.append(("ret", ERRNO(EPERM)))
     prog.append(("label", "sock"))
-    prog.append(("ld", 16))  # args[0] (domain), low 32 bits on little-endian
-    prog.append(("jeq", 1, "next", "sockdeny"))  # AF_UNIX
+    prog.append(("ld", arg(0)))  # domain
+    prog.append(("jeq", AF_UNIX, "next", "sockdeny"))
     prog.append(("ret", ALLOW))
+    if network == "serve":
+        prog.append(("label", "serve_sock"))
+        prog.append(("ld", arg(0)))
+        prog.append(("jeq", AF_UNIX, "allow", "next"))
+        prog.append(("jeq", AF_INET, "stream", "next"))
+        prog.append(("jeq", AF_INET6, "stream", "sockdeny"))
+        prog.append(("label", "stream"))
+        prog.append(("ld", arg(1)))  # type (with SOCK_NONBLOCK / SOCK_CLOEXEC flags)
+        prog.append(("and", 0xF))
+        prog.append(("jeq", SOCK_STREAM, "allow", "sockdeny"))
+        prog.append(("label", "flags3"))
+        prog.append(("ld", arg(3)))
+        prog.append(("jset", MSG_FASTOPEN, "sockdeny", "allow"))
+        prog.append(("label", "flags2"))
+        prog.append(("ld", arg(2)))
+        prog.append(("jset", MSG_FASTOPEN, "sockdeny", "allow"))
+        prog.append(("label", "allow"))
+        prog.append(("ret", ALLOW))
     prog.append(("label", "sockdeny"))
     prog.append(("ret", ERRNO(EACCES)))
-    real = []
+    labels, real = {}, []
     for item in prog:
         if item[0] == "label":
             labels[item[1]] = len(real)
@@ -74,8 +102,10 @@ def _seccomp_filter(network: bool = False) -> bytes:
             out += struct.pack("HBBI", LD_W_ABS, 0, 0, item[1])
         elif item[0] == "ret":
             out += struct.pack("HBBI", RET_K, 0, 0, item[1])
+        elif item[0] == "and":
+            out += struct.pack("HBBI", AND_K, 0, 0, item[1])
         else:
-            code = JEQ_K if item[0] == "jeq" else JGE_K
+            code = {"jeq": JEQ_K, "jge": JGE_K, "jset": JSET_K}[item[0]]
             jt = 0 if item[2] == "next" else labels[item[2]] - i - 1
             jf = 0 if item[3] == "next" else labels[item[3]] - i - 1
             assert 0 <= jt < 256 and 0 <= jf < 256
@@ -103,7 +133,8 @@ def _lockdown(cfg: dict) -> None:
         raise OSError(ctypes.get_errno(), "PR_SET_DUMPABLE")
     if libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0:
         raise OSError(ctypes.get_errno(), "PR_SET_NO_NEW_PRIVS")
-    filt = _seccomp_filter(bool(cfg.get("network")))
+    net = cfg.get("network")
+    filt = _seccomp_filter("serve" if net == "serve" else bool(net))
     buf = ctypes.create_string_buffer(filt, len(filt))
 
     class SockFprog(ctypes.Structure):

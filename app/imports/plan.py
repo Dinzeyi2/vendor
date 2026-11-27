@@ -8,6 +8,7 @@ A plan names one runtime (the backend code that knows how to fetch, build, disco
   node      JavaScript / TypeScript packages (package.json + npm / yarn / pnpm lockfile)
   native    C / C++ projects built with CMake, a configure script or a Makefile
   frontend  CSS / frontend packages built into static assets
+  service   HTTP services: a Python ASGI/WSGI app (FastAPI, Flask...) or a Node.js server
   container Dockerfile / compose services                     (no runtime on this server yet)
   conda     conda / pixi environments                          (no runtime on this server yet)
 
@@ -30,15 +31,17 @@ import jsonschema
 
 from app.imports.github import ImportFailure
 
-RUNTIMES = ("python", "node", "native", "frontend", "container", "conda")
-AVAILABLE = ("python", "node", "native", "frontend")
+RUNTIMES = ("python", "node", "native", "frontend", "service", "container", "conda")
+AVAILABLE = ("python", "node", "native", "frontend", "service")
 MAX_PARSE = 512 * 1024
 IDENT = r"^[A-Za-z_][A-Za-z0-9_]{0,99}$"
 
 _OPERATION = {
     "type": "object", "additionalProperties": False, "required": ["kind"],
     "properties": {
-        "kind": {"enum": ["function", "command", "asset"]},
+        "kind": {"enum": ["function", "command", "asset", "http"]},
+        "method": {"enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]},      # http
+        "path": {"type": "string", "pattern": "^/"},                         # http
         "name": {"type": "string", "pattern": r"^[a-z][a-z0-9_]{0,59}$"},
         "summary": {"type": "string", "minLength": 10, "maxLength": 300},
         # function: "module:attr.path" (Python) or "export.path" (JavaScript)
@@ -69,9 +72,13 @@ CONFIG_SCHEMA: Dict[str, Any] = {
     "type": "object", "additionalProperties": False,
     "properties": {
         "runtime": {"enum": list(RUNTIMES)},
+        "profile": {"enum": ["standard", "large"]},     # worker profile (normally chosen from measurements)
         "root": {"type": "string", "pattern": r"^(?!/)(?!.*\.\.)[A-Za-z0-9._/-]{0,200}$"},
         "package": {"type": "string", "minLength": 1, "maxLength": 200},
-        "entry_point": {"type": "string", "pattern": r"^[A-Za-z_$][A-Za-z0-9_$.]{0,199}$"},
+        "entry_point": {"type": "string", "pattern": r"^(?:[A-Za-z_$][A-Za-z0-9_$.]{0,199}|(?:GET|POST|PUT|PATCH|DELETE) /[^\s]{0,200})$"},   # function, export, command or "POST /path"
+        "service": {"type": "object", "additionalProperties": False, "properties": {
+            "start": {"type": "array", "minItems": 1, "maxItems": 50, "items": {"type": "string"}},  # {port} placeholder
+            "env": {"type": "object", "additionalProperties": {"type": "string"}}}},
         "version": {"type": "string", "pattern": r"^[0-9][0-9A-Za-z.+-]{0,60}$"},
         "extra_requirements": {"type": "array", "maxItems": 50, "items": {"type": "string", "maxLength": 200}},
         "build": {
@@ -106,7 +113,7 @@ def validate_config(config: Dict[str, Any]) -> None:
     except jsonschema.SchemaError as exc:
         raise ValueError(f"operation.input_schema is not a valid JSON Schema: {exc.message}") from None
     op = config.get("operation") or {}
-    need = {"function": ["target"], "command": ["argv"], "asset": []}.get(op.get("kind"), [])
+    need = {"function": ["target"], "command": ["argv"], "asset": [], "http": ["method", "path"]}.get(op.get("kind"), [])
     missing = [k for k in need if k not in op]
     if missing:
         raise ValueError(f"operation of kind '{op['kind']}' needs {missing}")
@@ -189,11 +196,17 @@ def _python(base: Path) -> Optional[Dict[str, Any]]:
             info["build_requires"] = [r for r in bs.get("requires", []) if isinstance(r, str)]
             info["backend"] = bs.get("build-backend") or "setuptools.build_meta:__legacy__"
         proj = data.get("project") or {}
+        info["requires"] = [d for d in proj.get("dependencies") or [] if isinstance(d, str)] + \
+            list(((data.get("tool", {}).get("poetry", {}) or {}).get("dependencies") or {}).keys())
         info["name"] = proj.get("name") or (data.get("tool", {}).get("poetry", {}) or {}).get("name")
         info["scripts"] = {k: v for k, v in (proj.get("scripts") or {}).items() if isinstance(v, str)}
         if not info["scripts"]:
             info["scripts"] = {k: v for k, v in ((data.get("tool", {}).get("poetry", {}) or {})
                                                  .get("scripts") or {}).items() if isinstance(v, str)}
+    req = _read(base / "requirements.txt")
+    if req:
+        info.setdefault("requires", [])
+        info["requires"] += [l.split("#")[0].strip() for l in req.splitlines() if l.strip() and l[0].isalnum()]
     if setup_py and not info["scripts"]:
         info["scripts"] = _setup_py_scripts(setup_py)
     if setup_cfg and not info["scripts"]:
@@ -233,7 +246,11 @@ def _node(base: Path) -> Optional[Dict[str, Any]]:
             "typescript": bool(_first(base, "tsconfig.json")) or "typescript" in deps,
             "style": pkg.get("style") or pkg.get("sass") or pkg.get("less"),
             "has_install_scripts": any(k in scripts for k in ("preinstall", "install", "postinstall")),
-            "description": pkg.get("description") or ""}
+            "description": pkg.get("description") or "",
+            "server_deps": sorted(set(pkg.get("dependencies") or {}) & SERVER_DEPS),
+            "has_start": "start" in scripts,
+            "creates_server": _creates_server(base, pkg, main, scripts),
+            "is_library": bool(pkg.get("exports") or pkg.get("types") or pkg.get("typings") or pkg.get("module"))}
 
 
 def _is_frontend(base: Path, node: Dict[str, Any]) -> bool:
@@ -251,6 +268,24 @@ def _is_frontend(base: Path, node: Dict[str, Any]) -> bool:
     return len(styles) > 0 and len(styles) >= len(scripts)
 
 
+def _creates_server(base: Path, pkg: dict, main: Optional[str], scripts: dict) -> bool:
+    """The package's main or start file starts an HTTP server itself (Node's http module)."""
+    m = re.search(r"\bnode\s+([\w./-]+\.(?:c?js|mjs))", str(scripts.get("start") or ""))
+    for rel in [m.group(1) if m else None, main, "server.js", "index.js", "app.js"]:
+        text = _read(base / rel) if rel else None
+        if text and re.search(r"\b(?:http|https)\.createServer\(|\bcreateServer\(", text):
+            return True
+    return False
+
+
+SERVER_DEPS = {"express", "koa", "fastify", "@hapi/hapi", "hapi", "restify", "socket.io", "next", "nuxt",
+               "@nestjs/core", "sails", "loopback", "@loopback/core"}
+
+
+def _is_service(node: Dict[str, Any]) -> bool:
+    return bool(node.get("server_deps") or node.get("creates_server")) and bool(node.get("has_start") or node.get("main"))         and not node.get("is_library") and not node.get("bin")
+
+
 def _native(base: Path) -> Optional[Dict[str, Any]]:
     cmake = _read(base / "CMakeLists.txt")
     if cmake is not None:
@@ -258,6 +293,8 @@ def _native(base: Path) -> Optional[Dict[str, Any]]:
                 "fetches_at_build": bool(re.search(r"(?i)\b(FetchContent_\w+|ExternalProject_Add)\b", cmake))}
     if (base / "configure").is_file():
         return {"system": "autotools"}
+    if _first(base, "configure.ac", "configure.in"):
+        return {"system": "autotools", "autoreconf": True}   # configure is generated: autoreconf first
     if _first(base, "Makefile", "makefile", "GNUmakefile"):
         return {"system": "make"}
     return None
@@ -277,13 +314,19 @@ def detect(src: Path, repo_name: str, config: Optional[Dict[str, Any]] = None) -
                                  "configure", "Dockerfile", "docker-compose.yml", "compose.yaml", "Containerfile",
                                  "pixi.toml", "environment.yml", "Cargo.toml", "go.mod", "pom.xml", "build.gradle",
                                  ".gitmodules") if (base / n).is_file())
+    from app.imports import services
+    py_apps = services.detect_python(base) if not config.get("runtime") else []
+    node_service = bool(found["node"] and _is_service(found["node"]))
+    services_found = bool(py_apps) or node_service
     docker = [n for n in ("Dockerfile", "Containerfile", "docker-compose.yml", "docker-compose.yaml", "compose.yaml",
                           "compose.yml") if (base / n).is_file()]
     conda = [n for n in ("pixi.toml", "pixi.lock", "environment.yml", "environment.yaml", "meta.yaml")
              if (base / n).is_file()]
     runtime = config.get("runtime")
     if runtime is None:
-        if found["python"]:
+        if services_found:
+            runtime = "service"
+        elif found["python"]:
             runtime = "python"
         elif found["node"]:
             runtime = "frontend" if _is_frontend(base, found["node"]) else "node"
@@ -304,6 +347,22 @@ def detect(src: Path, repo_name: str, config: Optional[Dict[str, Any]] = None) -
                                [{"field": "runtime", "why": "no supported project files ("
                                  + ", ".join(signals or ["none found"]) + ")"}], signals=signals)
     plan: Dict[str, Any] = {"runtime": runtime, "root": root, "signals": signals, "docker": docker, "conda": conda}
+    if runtime == "container" and found["node"]:
+        plan["node"] = found["node"]
+    if runtime == "service":
+        apps = py_apps or ([] if found["node"] else services.detect_python(base))
+        if apps:
+            plan["service"] = {"runtime": "python", "apps": apps[:10], "app": apps[0]}
+            plan["python"] = found["python"] or {"build": False, "build_requires": [], "scripts": {}, "name": None}
+        elif found["node"]:
+            plan["service"] = {"runtime": "node"}
+            plan["node"] = found["node"]
+        elif not (config.get("service") or {}).get("start"):
+            raise NeedsConfig("The configuration says runtime 'service', but Cognex found no web app to start.",
+                              [{"field": "service.start", "why": "the command that starts the server on $PORT"}],
+                              {"service": {"start": ["python", "-m", "uvicorn", "module:app", "--port", "{port}"]}})
+        else:
+            plan["service"] = {"runtime": "python" if found["python"] else "node"}
     if runtime == "python":
         plan["python"] = found["python"] or {"build": False, "build_requires": [], "scripts": {}, "name": None}
     elif runtime in ("node", "frontend"):
@@ -321,7 +380,7 @@ def detect(src: Path, repo_name: str, config: Optional[Dict[str, Any]] = None) -
         plan["native"] = native
     plan["config"] = copy.deepcopy(config)
     for key in ("package", "entry_point", "version", "extra_requirements", "build", "executables", "assets",
-                "operation"):
+                "operation", "profile"):
         if key in config:
             plan[key] = copy.deepcopy(config[key])
     return plan
@@ -340,9 +399,11 @@ def unavailable(plan: Dict[str, Any]) -> NeedsRuntime:
                                                           "its image (" + ", ".join(plan["docker"]) + ")"}]
                                                         if plan["docker"] else []),
             signals=plan["signals"])
+    service = (plan.get("node") or {}).get("server_deps")
     return NeedsRuntime(
-        "container", "This project is distributed as a container (" + ", ".join(plan["docker"]) + "), not as a "
-        "library or command-line tool Cognex can build. Running container images needs a container runtime "
-        "(Docker/OCI) on the build workers, which this server doesn't have.",
+        "container", ("This project is a network service (" + ", ".join(service) + ") shipped as a container ("
+                      if service else "This project is distributed as a container (") + ", ".join(plan["docker"]) +
+        "), not as a library or command-line tool Cognex can build. Running container images needs a container "
+        "runtime (Docker/OCI) on the build workers, which this server doesn't have.",
         [{"field": "runtime", "why": "a container runtime (Docker/OCI) for isolated build workers"}],
         signals=plan["signals"])

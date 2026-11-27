@@ -40,7 +40,10 @@ def _env(scratch: str) -> Dict[str, str]:
     env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": scratch, "TMPDIR": scratch, "TMP": scratch,
            "TEMP": scratch, "LANG": "C.UTF-8", "PYTHONHASHSEED": "0", "PYTHONDONTWRITEBYTECODE": "1",
            "PYTHONIOENCODING": "utf-8", "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1",
-           "MKL_NUM_THREADS": "1", "NUMEXPR_NUM_THREADS": "1", "MPLBACKEND": "Agg"}
+           "MKL_NUM_THREADS": "1", "NUMEXPR_NUM_THREADS": "1", "MPLBACKEND": "Agg",
+           # WebAssembly normally reserves ~10 GB of address space per instance; under the sandbox's
+           # address-space limit that fails, so use bounds checks instead (Node 22.2+).
+           "NODE_OPTIONS": "--disable-wasm-trap-handler"}
     if sys.platform == "win32":  # insecure-dev on Windows: the interpreter needs these to start
         for k in ("SYSTEMROOT", "WINDIR", "PATH"):
             if k in os.environ:
@@ -53,6 +56,7 @@ PROFILES = {
     "call": {"memory_mb": 2048, "file_mb": 64, "open_files": 256, "processes": 64},
     "build": {"memory_mb": 6144, "file_mb": 1024, "open_files": 4096, "processes": 512},
     "fetch": {"memory_mb": 4096, "file_mb": 1024, "open_files": 4096, "processes": 256},
+    "serve": {"memory_mb": 8192, "file_mb": 256, "open_files": 1024, "processes": 256},
 }
 
 
@@ -71,7 +75,7 @@ def _own(paths: List[Path], uid: int) -> None:
 
 def run(sandbox_mode: str, payload: Dict[str, Any], *, paths: List[str], timeout: float,
         memory_mb: Optional[int] = None, cpu_seconds: Optional[int] = None, scratch_root: Optional[Path] = None,
-        on_start=None, profile: str = "call", network: bool = False,
+        on_start=None, profile: str = "call", network=False,
         writable: Optional[List[Path]] = None) -> Dict[str, Any]:
     """Run runner.MODES[sandbox_mode](payload) in the sandbox; returns its (untrusted) result dict.
 
@@ -90,7 +94,8 @@ def run(sandbox_mode: str, payload: Dict[str, Any], *, paths: List[str], timeout
             os.chmod(scratch, 0o700)
             _own([Path(p) for p in writable or []], uid)
         cfg = {"mode": sandbox_mode, "payload": {**payload, "scratch": scratch}, "uid": uid, "strict": strict,
-               "app_dir": str(ROOT), "paths": [str(p) for p in paths], "network": bool(network),
+               "app_dir": str(ROOT), "paths": [str(p) for p in paths],
+               "network": "serve" if network == "serve" else bool(network),
                "limits": {"memory_bytes": (memory_mb or prof["memory_mb"]) * 1024 * 1024,
                           "cpu_seconds": int(cpu_seconds or timeout + 5),
                           "file_bytes": prof["file_mb"] * 1024 * 1024,
@@ -139,7 +144,8 @@ def _kill(proc: subprocess.Popen) -> None:
     try:
         if os.name == "posix":
             os.killpg(proc.pid, signal.SIGKILL)
-        else:
+        else:  # local development on Windows: stop this run's process tree (a service's server child too)
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=30)
             proc.kill()
     except (ProcessLookupError, PermissionError, OSError):
         pass
@@ -147,3 +153,57 @@ def _kill(proc: subprocess.Popen) -> None:
         proc.wait(5)
     except subprocess.TimeoutExpired:
         pass
+
+
+class Service:
+    """A long-running sandboxed process (an imported HTTP service): started by serve(), stopped by
+    stop(). It runs under the "serve" seccomp mode: it may listen on TCP but never connect out."""
+
+    def __init__(self, proc: subprocess.Popen, scratch: str, err_path: Path, writable: List[Path], owns: bool):
+        self.proc, self.scratch, self.err_path, self.writable, self.owns = proc, scratch, err_path, writable, owns
+
+    def alive(self) -> bool:
+        return self.proc.poll() is None
+
+    def stderr_tail(self, n: int = 1500) -> str:
+        try:
+            return self.err_path.read_bytes()[-n:].decode("utf-8", "replace")
+        except OSError:
+            return ""
+
+    def stop(self) -> None:
+        _kill(self.proc)
+        if self.owns and self.writable:
+            _own([Path(p) for p in self.writable], 0)
+        shutil.rmtree(self.scratch, ignore_errors=True)
+
+
+def serve(payload: Dict[str, Any], *, paths: List[str], memory_mb: int, cpu_seconds: int,
+          scratch_root: Optional[Path] = None, writable: Optional[List[Path]] = None) -> Service:
+    uid = random.randint(20000, 59999)
+    root = Path(scratch_root or tempfile.gettempdir())
+    root.mkdir(parents=True, exist_ok=True)
+    scratch = tempfile.mkdtemp(prefix="svc-", dir=root)
+    strict = mode() == "strict"
+    owns = strict and hasattr(os, "chown") and os.geteuid() == 0
+    prof = PROFILES["serve"]
+    if owns:
+        os.chown(scratch, uid, uid)
+        os.chmod(scratch, 0o700)
+        _own([Path(p) for p in writable or []], uid)
+    cfg = {"mode": "serve", "payload": {**payload, "scratch": scratch}, "uid": uid, "strict": strict,
+           "app_dir": str(ROOT), "paths": [str(p) for p in paths], "network": "serve",
+           "limits": {"memory_bytes": memory_mb * 1024 * 1024, "cpu_seconds": int(cpu_seconds),
+                      "file_bytes": prof["file_mb"] * 1024 * 1024, "open_files": prof["open_files"],
+                      "processes": prof["processes"]}}
+    err_path = Path(scratch) / ".stderr"
+    out = open(Path(scratch) / ".result", "wb")
+    err = open(err_path, "wb")
+    kwargs = {"start_new_session": True} if os.name == "posix" else {}
+    proc = subprocess.Popen([sys.executable, "-I", str(BOOT)], stdin=subprocess.PIPE, stdout=out, stderr=err,
+                            env=_env(scratch), cwd=scratch, **kwargs)
+    proc.stdin.write(json.dumps(cfg).encode())
+    proc.stdin.close()
+    out.close()
+    err.close()
+    return Service(proc, scratch, err_path, list(writable or []), owns)

@@ -28,6 +28,15 @@ is Ready, private to that customer.
   - `github.py`, `licensing.py`, `packaging.py`, `installer.py`: trusted steps that never run repo code
   - `sandbox.py` + `sandbox_boot.py` + `runner.py` + `node_runner.mjs`: isolated execution
   - `private.py`: per-customer capabilities
+  - `services.py`: HTTP services (Python ASGI/WSGI apps, Node servers). They run in the sandbox's
+    "serve" seccomp mode, which can listen on TCP but never connect out. Endpoints come from
+    `/openapi.json` or from route declarations; each call starts the service.
+  - `profiles.py`: worker profiles, `standard` or `large`. One is chosen from measured repo and
+    dependency size, heavy ML dependencies, or a build that ran out of time or memory. Never per repo.
+- Several plausible entry points → `multiple_entry_points` with candidates.
+  `POST /v1/admin/imports/{id}/entry-point` saves the choice in the repo configuration and re-runs
+  the repo's imports.
+- Every import records an `output_schema` (inferred from the verified response) next to its input schema.
 - **A new repo is a configuration change; new backend code is only for a new runtime type.**
   When detection can't settle something, the failure lists `missing` fields and gives a
   `config_template`. Save the filled-in template with PUT, and that repo's failed imports re-run.

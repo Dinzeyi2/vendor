@@ -20,8 +20,12 @@ from typing import List
 
 from app.imports.github import ImportFailure
 
-MAX_SITE_BYTES = 400 * 1024 * 1024
+from app.imports.profiles import CEILING  # noqa: E402
+
+MAX_SITE_BYTES = CEILING["deps_mb"] * 1024 * 1024   # largest worker profile; the profile is chosen from the size
 INDEX = "https://pypi.org/simple"
+# PyTorch's own CPU-only wheels: the PyPI ones bundle several GB of CUDA libraries a CPU worker can't use.
+EXTRA_INDEXES = ["https://download.pytorch.org/whl/cpu"]
 
 
 def _satisfied(req: str) -> bool:
@@ -72,7 +76,7 @@ def _explain(stderr: str) -> str:
     return f"The dependencies couldn't be installed: {tail}"
 
 
-def install(requirements: List[str], site: Path, timeout: float = 300, skip_satisfied: bool = True) -> List[str]:
+def install(requirements: List[str], site: Path, timeout: float = 900, skip_satisfied: bool = True) -> List[str]:
     """Install what's missing into `site`; returns exact pins (name==version) of what was installed."""
     site.mkdir(parents=True, exist_ok=True)
     needed = [r for r in requirements if not (skip_satisfied and _satisfied(r))]
@@ -81,6 +85,7 @@ def install(requirements: List[str], site: Path, timeout: float = 300, skip_sati
     with tempfile.TemporaryDirectory() as tmp:
         report = Path(tmp) / "report.json"
         proc = _pip(["install", "--target", str(site), "--only-binary=:all:", "--index-url", INDEX,
+                     *[a for u in EXTRA_INDEXES for a in ("--extra-index-url", u)],
                      "--no-warn-script-location", "--report", str(report), *needed], timeout)
         if proc.returncode != 0:
             raise ImportFailure("unsupported_dependency", _explain(proc.stderr), requirements=needed)
@@ -93,8 +98,9 @@ def install(requirements: List[str], site: Path, timeout: float = 300, skip_sati
         except (OSError, json.JSONDecodeError):
             pass
     if _size(site) > MAX_SITE_BYTES:
-        raise ImportFailure("unsupported_dependency",
-                            f"The dependencies are larger than {MAX_SITE_BYTES // (1024 * 1024)} MB.")
+        raise ImportFailure("insufficient_resources",
+                            f"The dependencies are larger than {MAX_SITE_BYTES // (1024 * 1024)} MB, the limit of the "
+                            f"largest worker profile.")
     return sorted(pins)
 
 
@@ -113,6 +119,7 @@ def reinstall(pins: List[str], site: Path, timeout: float = 300) -> None:
     if not pins:
         return
     proc = _pip(["install", "--target", str(site), "--only-binary=:all:", "--no-deps", "--index-url", INDEX,
+                 *[a for u in EXTRA_INDEXES for a in ("--extra-index-url", u)],
                  "--no-warn-script-location", *pins], timeout)
     if proc.returncode != 0:
         raise ImportFailure("unsupported_dependency", _explain(proc.stderr))
